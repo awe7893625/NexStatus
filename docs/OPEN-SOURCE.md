@@ -17,15 +17,14 @@ git init
 git add .
 git commit -m "Initial release: NexStatus MenuBar for AI usage + host metrics"
 git branch -M main
-git remote add origin git@github.com:<you>/NexStatus.git
+git remote add origin git@github.com:awe7893625/NexStatus.git
 git push -u origin main
 ```
 
-4. Add topics on GitHub: `macos`, `menubar`, `hammerspoon`, `claude`, `codex`, `grok`, `opencode`, `status`.
+Public repo (live): **https://github.com/awe7893625/NexStatus**  
+GitHub Pages (live): **https://awe7893625.github.io/NexStatus/**
 
-5. Optional: GitHub About blurb
-
-> One MenuBar for Claude, Codex, OpenCode Go, Grok credits, and Mac memory — glass panel UI, MIT licensed.
+Topics: `macos`, `menubar`, `hammerspoon`, `claude`, `codex`, `grok`, `opencode`, `status`.
 
 ## What stays private on the author’s machine
 

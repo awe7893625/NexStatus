@@ -252,10 +252,10 @@ def _opencode_key() -> str | None:
         key = auth["opencode"].get("key")
         if isinstance(key, str) and key:
             return key
-    # knox fallback (no secret logged)
+    # Optional dotenv-style files (never log contents)
     for path in (
-        Path(os.path.expanduser("~/.knox/harness-team.env")),
-        Path(os.path.expanduser("~/secrets/harness-team.env")),
+        Path(os.path.expanduser("~/.config/nexstatus/env")),
+        Path(os.path.expanduser("~/.config/opencode/.env")),
     ):
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -448,6 +448,13 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
                 elif "5 hour" in low or "five hour" in low:
                     limit_name = "five_hour"
             if isinstance(message, str):
+                # Strip personal workspace links before caching/display
+                import re as _re
+                message = _re.sub(
+                    r"https://opencode\.ai/workspace/[^\s]+",
+                    "https://opencode.ai/workspace/…",
+                    message,
+                )
                 resets_in_sec = _parse_go_reset_seconds(message)
             # Retry-After header (seconds) as fallback
             if resets_in_sec is None:

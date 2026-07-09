@@ -1,6 +1,13 @@
 # NexStatus
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![macOS](https://img.shields.io/badge/platform-macOS-black.svg)](https://github.com/awe7893625/NexStatus)
+[![GitHub Pages](https://img.shields.io/badge/site-awe7893625.github.io%2FNexStatus-0A84FF.svg)](https://awe7893625.github.io/NexStatus/)
+
 **One macOS MenuBar for AI usage + machine load.**
+
+🌐 **Landing page:** https://awe7893625.github.io/NexStatus/  
+📦 **Source:** https://github.com/awe7893625/NexStatus
 
 See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with progress bars.
 
@@ -122,12 +129,14 @@ NexStatus/
 
 ---
 
-## Privacy
+## Privacy & security
 
 - Collector never writes API keys into `~/.cache/nexstatus/status.json`
 - Grok / OpenCode tokens are read from existing local auth files or env vars
 - Host metrics stay on-device
 - Remote probes are cached (Grok ~5m, OpenCode Go ~5–15m) to avoid hammering APIs
+- OpenCode workspace URLs in error messages are redacted before cache/display
+- Full notes: [docs/SECURITY.md](docs/SECURITY.md)
 
 ---
 

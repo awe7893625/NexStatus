@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NexStatus — AI usage in your MenuBar</title>
+  <meta name="description" content="One macOS MenuBar for Claude, Codex, OpenCode Go, Grok credits, and Mac memory. Glass panel. MIT." />
+  <meta property="og:title" content="NexStatus" />
+  <meta property="og:description" content="Claude · Codex · OpenCode Go · Grok · Memory — one glass MenuBar." />
+  <meta property="og:type" content="website" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg0: #07080c;
+      --bg1: #0e1118;
+      --card: rgba(28, 30, 38, 0.72);
+      --line: rgba(255,255,255,0.09);
+      --text: #f4f5f7;
+      --muted: rgba(235,235,245,0.58);
+      --soft: rgba(235,235,245,0.38);
+      --blue: #0a84ff;
+      --green: #30d158;
+      --orange: #ff9f0a;
+      --red: #ff453a;
+      --purple: #bf5af2;
+      --claude: #d97757;
+      --codex: #10a37f;
+      --radius: 20px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      min-height: 100%;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(900px 500px at 12% -10%, rgba(10,132,255,0.22), transparent 55%),
+        radial-gradient(700px 420px at 92% 8%, rgba(191,90,242,0.16), transparent 50%),
+        radial-gradient(600px 380px at 70% 100%, rgba(48,209,88,0.08), transparent 45%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .wrap {
+      width: min(1080px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 28px 0 80px;
+    }
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; margin-bottom: 56px;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 10px;
+      font-weight: 700; letter-spacing: -0.03em; font-size: 17px;
+    }
+    .logo {
+      width: 28px; height: 28px; border-radius: 8px;
+      background: linear-gradient(145deg, #0a84ff, #bf5af2 70%);
+      box-shadow: 0 8px 24px rgba(10,132,255,0.35);
+    }
+    .nav-links { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 38px; padding: 0 16px; border-radius: 999px;
+      font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.04);
+      transition: transform .15s ease, background .15s ease;
+    }
+    .btn:hover { background: rgba(255,255,255,0.08); transform: translateY(-1px); }
+    .btn.primary {
+      background: var(--blue); border-color: transparent; color: white;
+      box-shadow: 0 10px 28px rgba(10,132,255,0.35);
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 42px;
+      align-items: center;
+      margin-bottom: 64px;
+    }
+    @media (max-width: 860px) {
+      .hero { grid-template-columns: 1fr; gap: 28px; }
+    }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 600; color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(48,209,88,0.15);
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(34px, 5vw, 52px);
+      line-height: 1.05;
+      letter-spacing: -0.045em;
+      font-weight: 700;
+    }
+    h1 em {
+      font-style: normal;
+      background: linear-gradient(90deg, #7cb8ff, #d2a8ff 55%, #8dffb0);
+      -webkit-background-clip: text; background-clip: text;
+      color: transparent;
+    }
+    .lede {
+      margin: 0 0 28px;
+      font-size: 17px; line-height: 1.55;
+      color: var(--muted); max-width: 46ch;
+    }
+    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
+    .meta {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px; color: var(--soft);
+    }
+    /* Mock menubar + glass panel */
+    .stage {
+      position: relative;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      box-shadow: 0 30px 80px rgba(0,0,0,0.45);
+      overflow: hidden;
+      min-height: 460px;
+      padding: 14px;
+    }
+    .menubar {
+      display: flex; justify-content: flex-end; align-items: center;
+      gap: 10px;
+      height: 34px; padding: 0 10px;
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(70,100,150,0.55), rgba(40,60,95,0.55));
+      border: 1px solid rgba(255,255,255,0.12);
+      margin-bottom: 14px;
+      font-size: 12px; font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+    }
+    .chip {
+      background: rgba(0,0,0,0.28);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 999px;
+      padding: 4px 10px;
+      letter-spacing: -0.02em;
+    }
+    .panel {
+      width: min(340px, 100%);
+      margin-left: auto;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background:
+        radial-gradient(120% 80% at 0% 0%, rgba(10,132,255,0.14), transparent 52%),
+        radial-gradient(100% 70% at 100% 100%, rgba(191,90,242,0.10), transparent 48%),
+        rgba(22,24,30,0.82);
+      backdrop-filter: blur(28px);
+      box-shadow: 0 22px 56px rgba(0,0,0,0.48);
+      padding: 12px;
+    }
+    .panel-top {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 2px 4px 8px;
+    }
+    .panel-top strong { font-size: 13px; }
+    .panel-top span { font-size: 11px; color: var(--soft); }
+    .card {
+      background: rgba(44,46,54,0.72);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+    .card-h {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; margin-bottom: 4px;
+    }
+    .id { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+    .ball { width: 8px; height: 8px; border-radius: 50%; }
+    .badge {
+      font-size: 10px; font-weight: 600; color: var(--muted);
+      background: rgba(120,120,128,0.24); border-radius: 999px; padding: 2px 7px;
+    }
+    .val {
+      font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      letter-spacing: -0.03em;
+    }
+    .sub { font-size: 11px; color: var(--soft); margin-bottom: 8px; }
+    .meter-top {
+      display: flex; justify-content: space-between;
+      font-size: 11px; color: var(--muted); margin-bottom: 4px;
+    }
+    .track {
+      height: 4px; border-radius: 999px; background: rgba(120,120,128,0.28); overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .fill { height: 100%; border-radius: 999px; }
+    .section-title {
+      margin: 0 0 18px;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-bottom: 48px;
+    }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+    .feature {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      padding: 18px 18px 20px;
+    }
+    .feature h3 {
+      margin: 0 0 8px; font-size: 16px; letter-spacing: -0.02em;
+    }
+    .feature p {
+      margin: 0; font-size: 14px; line-height: 1.5; color: var(--muted);
+    }
+    .install {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(0,0,0,0.28);
+      padding: 22px;
+      margin-bottom: 48px;
+    }
+    .install h2 {
+      margin: 0 0 12px; font-size: 22px; letter-spacing: -0.03em;
+    }
+    pre {
+      margin: 0;
+      overflow: auto;
+      border-radius: 12px;
+      background: #0b0d12;
+      border: 1px solid var(--line);
+      padding: 16px 18px;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 13px; line-height: 1.55; color: #d7e0ff;
+    }
+    .security {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+      margin-bottom: 48px;
+    }
+    @media (max-width: 860px) { .security { grid-template-columns: 1fr; } }
+    .check {
+      display: flex; gap: 10px; align-items: flex-start;
+      margin: 0 0 10px; font-size: 14px; color: var(--muted); line-height: 1.45;
+    }
+    .check b { color: var(--text); font-weight: 600; }
+    .ok {
+      flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+      background: rgba(48,209,88,0.16); color: var(--green);
+      display: grid; place-items: center; font-size: 11px; font-weight: 700;
+      margin-top: 2px;
+    }
+    footer {
+      display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      padding-top: 22px; border-top: 1px solid var(--line);
+      color: var(--soft); font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><span class="logo" aria-hidden="true"></span> NexStatus</div>
+      <div class="nav-links">
+        <a class="btn" href="https://github.com/awe7893625/NexStatus">GitHub</a>
+        <a class="btn" href="https://github.com/awe7893625/NexStatus#install">Docs</a>
+        <a class="btn primary" href="https://github.com/awe7893625/NexStatus#install">Install</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow"><span class="dot"></span> macOS · MIT · Open source</div>
+        <h1>AI usage,<br /><em>one MenuBar.</em></h1>
+        <p class="lede">
+          Claude, Codex, OpenCode Go, Grok credits, and Mac memory —
+          unified in a Control Center–style glass panel. No keys written to the snapshot.
+        </p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/awe7893625/NexStatus">View on GitHub</a>
+          <a class="btn" href="#install">Install in 30s</a>
+        </div>
+        <div class="meta">Hammerspoon · Python 3 · Apple Silicon ready</div>
+      </div>
+
+      <div class="stage" aria-hidden="true">
+        <div class="menubar">
+          <span class="chip">Cl7 · Cx8 · Go100 · G8 · M22</span>
+          <span style="opacity:.75">🎙</span>
+          <span style="opacity:.75">Wi‑Fi</span>
+          <span style="opacity:.9">12:08</span>
+        </div>
+        <div class="panel">
+          <div class="panel-top">
+            <strong>NexStatus <span style="color:var(--muted);font-weight:500">usage</span></strong>
+            <span>live</span>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <div class="id"><span class="ball" style="background:var(--claude)"></span> Claude <span class="badge">Sonnet</span></div>
+              <div class="val">7% · 5h</div>
+            </div>
+            <div class="sub">7d 28% · resets later today</div>
+            <div class="meter-top"><span>5 hour</span><span style="color:var(--green)">7%</span></div>
+            <div class="track"><div class="fill" style="width:7%;background:var(--green)"></div></div>
+            <div class="meter-top"><span>7 day</span><span style="color:var(--blue)">28%</span></div>
+            <div class="track"><div class="fill" style="width:28%;background:var(--blue)"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <div class="id"><span class="ball" style="background:var(--codex)"></span> Codex <span class="badge">prolite</span></div>
+              <div class="val">8% · 5h</div>
+            </div>
+            <div class="sub">7d 46% · plan prolite</div>
+            <div class="meter-top"><span>5 hour</span><span style="color:var(--green)">8%</span></div>
+            <div class="track"><div class="fill" style="width:8%;background:var(--green)"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <div class="id"><span class="ball" style="background:var(--orange)"></span> OpenCode Go <span class="badge">$10/mo</span></div>
+              <div class="val" style="color:var(--red)">100% · monthly</div>
+            </div>
+            <div class="sub">Official cap hit · free models still ok</div>
+            <div class="meter-top"><span>monthly</span><span style="color:var(--red)">100%</span></div>
+            <div class="track"><div class="fill" style="width:100%;background:var(--red)"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <div class="id"><span class="ball" style="background:var(--purple)"></span> Grok <span class="badge">credits</span></div>
+              <div class="val">8% · month</div>
+            </div>
+            <div class="sub">credits this billing period</div>
+            <div class="meter-top"><span>monthly</span><span style="color:var(--green)">8%</span></div>
+            <div class="track"><div class="fill" style="width:8%;background:var(--green)"></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <p class="section-title">Why NexStatus</p>
+    <div class="grid">
+      <div class="feature">
+        <h3>One glance</h3>
+        <p>Stop opening five apps to check whether Claude, Codex, Go, or Grok is about to rate-limit you.</p>
+      </div>
+      <div class="feature">
+        <h3>Apple-like glass</h3>
+        <p>Control Center–inspired panel with semantic progress bars — green → blue → orange → red.</p>
+      </div>
+      <div class="feature">
+        <h3>Privacy first</h3>
+        <p>Tokens stay local for probes. Snapshots never store API keys. Secrets stay off the repo.</p>
+      </div>
+    </div>
+
+    <section class="install" id="install">
+      <h2>Install</h2>
+      <pre>git clone https://github.com/awe7893625/NexStatus.git
+cd NexStatus
+./scripts/install.sh</pre>
+      <p style="margin:14px 0 0;color:var(--muted);font-size:14px;line-height:1.5">
+        Needs macOS + <a style="color:var(--blue)" href="https://www.hammerspoon.org/">Hammerspoon</a> + Python 3.
+        Optional: Claude Code, Codex, OpenCode Go, Grok CLI for each usage source.
+      </p>
+    </section>
+
+    <section class="security">
+      <div>
+        <p class="section-title">Security review</p>
+        <div class="check"><span class="ok">✓</span><div><b>No API keys in git</b> — collector only reads existing local auth files or env vars at runtime.</div></div>
+        <div class="check"><span class="ok">✓</span><div><b>No secrets in snapshot</b> — <code style="color:var(--text)">~/.cache/nexstatus/status.json</code> holds percentages, not tokens.</div></div>
+        <div class="check"><span class="ok">✓</span><div><b>Personal workspace URLs redacted</b> — OpenCode error messages strip private workspace paths.</div></div>
+        <div class="check"><span class="ok">✓</span><div><b>Obsidian vault stays private</b> — team vault repo is separate and private; not part of NexStatus.</div></div>
+        <div class="check"><span class="ok">✓</span><div><b>MIT license</b> — free to use, fork, and contribute.</div></div>
+      </div>
+      <div class="feature">
+        <h3>What NexStatus never does</h3>
+        <p style="margin-bottom:10px">• Upload your chats or vault notes</p>
+        <p style="margin-bottom:10px">• Commit <code>auth.json</code> or env files</p>
+        <p style="margin-bottom:10px">• Expose Tailscale / home paths in public docs</p>
+        <p style="margin:0">• Require a cloud account for the MenuBar itself</p>
+      </div>
+    </section>
+
+    <footer>
+      <div>NexStatus · MIT · <a href="https://github.com/awe7893625/NexStatus">github.com/awe7893625/NexStatus</a></div>
+      <div>Built for people who live in Claude · Codex · OpenCode · Grok</div>
+    </footer>
+  </div>
+</body>
+</html>
