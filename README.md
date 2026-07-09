@@ -47,7 +47,7 @@ No API keys are written into the status snapshot.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/NexStatus.git
+git clone https://github.com/awe7893625/NexStatus.git
 cd NexStatus
 ./scripts/install.sh
 ```

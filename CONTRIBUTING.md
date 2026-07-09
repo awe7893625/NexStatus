@@ -5,7 +5,7 @@ Thanks for helping make NexStatus better.
 ## Dev setup
 
 ```bash
-git clone https://github.com/<you>/NexStatus.git
+git clone https://github.com/awe7893625/NexStatus.git
 cd NexStatus
 ./scripts/install.sh
 ```
