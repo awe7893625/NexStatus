@@ -96,7 +96,9 @@ end
 
 local function savePrefs()
   local dir = PREFS_PATH:match("(.+)/[^/]+$")
-  if dir then hs.fs.mkdir(dir) end
+  if dir then
+    os.execute(string.format("mkdir -p %q", dir))
+  end
   local f = io.open(PREFS_PATH, "w")
   if not f then return end
   f:write(hs.json.encode({ chart = prefs.chart, theme = prefs.theme }))
@@ -648,27 +650,34 @@ local function buildHTML(s)
       <div class="stamp">%s<br/><span style="opacity:.8">%s · %s</span></div>
     </div>
     <div class="toolbar">
-      <a class="pill" href="nexstatus://cycle-chart">圖表：%s</a>
-      <a class="pill" href="nexstatus://cycle-theme">主題：%s</a>
+      <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
+      <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
     </div>
     <div class="list">
       %s
     </div>
     <div class="actions">
-      <a class="btn primary" href="nexstatus://refresh">重新整理</a>
-      <a class="btn" href="nexstatus://close">關閉面板</a>
-      <div class="hint">點「圖表／主題」可切換風格 · MenuBar 標題可再開</div>
+      <a class="btn primary" href="#" data-action="refresh">重新整理</a>
+      <a class="btn" href="#" data-action="close">關閉面板</a>
+      <div class="hint">點「圖表／主題」可切換 · 此窗即控制面</div>
     </div>
   </div>
   <script>
-    document.addEventListener('click', function (e) {
+    function sendAction(action) {
+      try {
+        window.webkit.messageHandlers.nexBridge.postMessage({ action: action });
+      } catch (e) {
+        document.title = "NEX|" + action;
+      }
+    }
+    document.addEventListener("click", function (e) {
       var t = e.target;
-      while (t && t.tagName !== 'A') t = t.parentElement;
+      while (t && !(t.getAttribute && t.getAttribute("data-action"))) {
+        t = t.parentElement;
+      }
       if (!t) return;
-      var href = t.getAttribute('href') || '';
-      if (href.indexOf('nexstatus:') !== 0) return;
       e.preventDefault();
-      window.location.href = href;
+      sendAction(t.getAttribute("data-action"));
     }, true);
   </script>
 </body>
@@ -702,12 +711,44 @@ local function showPanel()
   local html = buildHTML(s)
 
   if not panel then
+    -- Reliable button bridge: window.webkit.messageHandlers.nexBridge.postMessage(...)
+    local uc = hs.webview.usercontent.new("nexBridge")
+    uc:setCallback(function(msg)
+      local body = msg and msg.body
+      local action = nil
+      if type(body) == "string" then
+        action = body
+      elseif type(body) == "table" then
+        action = body.action or body.cmd or body[1]
+      end
+      if type(action) ~= "string" then return end
+      action = action:gsub("^/*", ""):gsub("[?#].*$", "")
+      hs.printf("[nexstatus] bridge action=%s", action)
+
+      if action == "refresh" then
+        refreshSnapshot(true)
+        if panel then panel:html(buildHTML(readSnapshot())) end
+        M.refreshTitleOnly()
+      elseif action == "cycle-chart" then
+        prefs.chart = cycleList(CHART_ORDER, prefs.chart)
+        savePrefs()
+        if panel then panel:html(buildHTML(readSnapshot())) end
+        hs.printf("[nexstatus] chart=%s", prefs.chart)
+      elseif action == "cycle-theme" then
+        prefs.theme = cycleList(THEME_ORDER, prefs.theme)
+        savePrefs()
+        if panel then panel:html(buildHTML(readSnapshot())) end
+        hs.printf("[nexstatus] theme=%s", prefs.theme)
+      elseif action == "close" then
+        hidePanel()
+      end
+    end)
+
     panel = hs.webview.new(hs.geometry.rect(0, 0, PANEL_W, PANEL_H), {
-      -- JS only for reliable button click → custom scheme (no remote content)
       javaScriptEnabled = true,
       javaScriptCanOpenWindowsAutomatically = false,
       developerExtrasEnabled = false,
-    })
+    }, uc)
     panel:windowStyle({ "borderless", "utility", "nonactivating" })
     panel:level(hs.drawing.windowLevels.floating)
     panel:allowGestures(false)
@@ -717,65 +758,12 @@ local function showPanel()
     panel:transparent(true)
     panel:deleteOnClose(false)
     panel:bringToFront(true)
-
-    local function handleAction(url)
-      if type(url) ~= "string" then return false end
-      -- accept nexstatus://action or nexstatus:/action
-      local action = url:match("nexstatus:/*([%w_%-]+)")
-      if not action then return false end
-      action = action:gsub("[?#].*$", "")
-      hs.printf("[nexstatus] action=%s url=%s", action, url)
-      if action == "refresh" then
-        refreshSnapshot(true)
-        if panel then panel:html(buildHTML(readSnapshot())) end
-        M.refreshTitleOnly()
-      elseif action == "cycle-chart" then
-        prefs.chart = cycleList(CHART_ORDER, prefs.chart)
-        savePrefs()
-        if panel then panel:html(buildHTML(readSnapshot())) end
-      elseif action == "cycle-theme" then
-        prefs.theme = cycleList(THEME_ORDER, prefs.theme)
-        savePrefs()
-        if panel then panel:html(buildHTML(readSnapshot())) end
-      elseif action == "close" then
-        hidePanel()
-      end
-      return true
-    end
-
-    local function extractUrl(details)
-      if type(details) == "string" then return details end
-      if type(details) ~= "table" then return nil end
-      return details.URL
-        or details.url
-        or details.mainDocumentURL
-        or (type(details.request) == "table" and (details.request.URL or details.request.url))
-        or (type(details.navigationAction) == "table" and details.navigationAction.request and details.navigationAction.request.URL)
-    end
-
-    -- Intercept custom scheme before WebKit errors
-    panel:policyCallback(function(action, _, details)
-      local url = extractUrl(details)
-      if url and handleAction(tostring(url)) then
-        return false -- cancel navigation
-      end
-      return true
-    end)
-
-    panel:navigationCallback(function(action, _, _, req)
-      local url = extractUrl(req) or req
-      if url and handleAction(tostring(url)) then
-        return false
-      end
-      return true
-    end)
   end
 
   panel:html(html)
   positionPanel()
   panel:show()
   panel:bringToFront(true)
-  -- Ensure key window so clicks register on Tahoe
   if panel.hswindow and panel:hswindow() then
     panel:hswindow():focus()
   end
@@ -792,6 +780,26 @@ end
 -- Public: open control panel (for debugging / scripts)
 function M.openPanel()
   showPanel()
+end
+
+-- Public: fire a panel action (refresh / cycle-chart / cycle-theme / close)
+function M.fire(action)
+  if type(action) ~= "string" then return end
+  if action == "refresh" then
+    refreshSnapshot(true)
+    if panel then panel:html(buildHTML(readSnapshot())) end
+    M.refreshTitleOnly()
+  elseif action == "cycle-chart" then
+    prefs.chart = cycleList(CHART_ORDER, prefs.chart)
+    savePrefs()
+    if panel then panel:html(buildHTML(readSnapshot())) end
+  elseif action == "cycle-theme" then
+    prefs.theme = cycleList(THEME_ORDER, prefs.theme)
+    savePrefs()
+    if panel then panel:html(buildHTML(readSnapshot())) end
+  elseif action == "close" then
+    hidePanel()
+  end
 end
 
 function M.refreshTitleOnly()
@@ -858,7 +866,7 @@ function M.start()
     hs.printf("[nexstatus] failed to create menubar")
     return
   end
-  -- Click opens glass panel (not native menu)
+  -- Left-click opens the glass control panel
   item:setClickCallback(function()
     togglePanel()
   end)
