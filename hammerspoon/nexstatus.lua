@@ -15,18 +15,29 @@ local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatu
 local PY = ROOT .. "/nexstatus/collector.py"
 local PYTHON = "/usr/bin/python3"
 local PANEL_W = 360
-local PANEL_H = 720
+local PANEL_H = 780
 
--- Chart style: bar | circle
--- Theme: glass | paper | mono | nord
+-- Chart: bar | circle
+-- Theme: glass | paper | mono | nord | aurora (creative)
+-- Glass lab: opacity / blur / saturate + named presets
 local CHART_ORDER = { "bar", "circle" }
-local THEME_ORDER = { "glass", "paper", "mono", "nord" }
+local THEME_ORDER = { "glass", "paper", "mono", "nord", "aurora" }
+local GLASS_PRESET_ORDER = { "soft", "crystal", "dense", "smoke" }
+
+local GLASS_PRESETS = {
+  soft    = { name = "柔霧", opacity = 0.88, blur = 22, saturate = 130 },
+  crystal = { name = "水晶", opacity = 0.72, blur = 48, saturate = 190 },
+  dense   = { name = "厚玻", opacity = 0.93, blur = 64, saturate = 155 },
+  smoke   = { name = "煙霧", opacity = 0.52, blur = 36, saturate = 115 },
+}
+
+-- RGB triples so opacity can be reapplied live
 local THEMES = {
   glass = {
     name = "Glass",
     color_scheme = "dark",
-    bg = "rgba(28, 28, 30, 0.78)",
-    card = "rgba(44, 44, 46, 0.72)",
+    bg = { 28, 28, 30 },
+    card = { 44, 44, 46 },
     border = "rgba(255,255,255,0.10)",
     text = "#F5F5F7",
     muted = "rgba(235,235,245,0.62)",
@@ -39,8 +50,8 @@ local THEMES = {
   paper = {
     name = "Paper",
     color_scheme = "light",
-    bg = "rgba(250, 247, 240, 0.94)",
-    card = "rgba(255, 255, 255, 0.88)",
+    bg = { 250, 247, 240 },
+    card = { 255, 255, 255 },
     border = "rgba(40,30,20,0.10)",
     text = "#1C1917",
     muted = "rgba(60,50,40,0.62)",
@@ -53,8 +64,8 @@ local THEMES = {
   mono = {
     name = "Mono",
     color_scheme = "dark",
-    bg = "rgba(12, 12, 12, 0.90)",
-    card = "rgba(28, 28, 28, 0.88)",
+    bg = { 12, 12, 12 },
+    card = { 28, 28, 28 },
     border = "rgba(255,255,255,0.12)",
     text = "#FAFAFA",
     muted = "rgba(255,255,255,0.55)",
@@ -67,8 +78,8 @@ local THEMES = {
   nord = {
     name = "Nord",
     color_scheme = "dark",
-    bg = "rgba(46, 52, 64, 0.90)",
-    card = "rgba(59, 66, 82, 0.88)",
+    bg = { 46, 52, 64 },
+    card = { 59, 66, 82 },
     border = "rgba(136,192,208,0.18)",
     text = "#ECEFF4",
     muted = "rgba(216,222,233,0.70)",
@@ -78,19 +89,80 @@ local THEMES = {
     glow1 = "rgba(136,192,208,0.14)",
     glow2 = "rgba(129,161,193,0.10)",
   },
+  -- Creative: polar-light aurora glass
+  aurora = {
+    name = "Aurora",
+    color_scheme = "dark",
+    bg = { 14, 20, 36 },
+    card = { 28, 38, 62 },
+    border = "rgba(165,243,252,0.22)",
+    text = "#F0FDFF",
+    muted = "rgba(186,230,253,0.72)",
+    sub = "rgba(186,230,253,0.48)",
+    track = "rgba(100,130,190,0.32)",
+    blue = "#67E8F9",
+    glow1 = "rgba(56,189,248,0.30)",
+    glow2 = "rgba(244,114,182,0.24)",
+    creative = true,
+  },
 }
 
-local prefs = { chart = "bar", theme = "glass" }
+local prefs = {
+  chart = "bar",
+  theme = "glass",
+  glass_preset = "crystal",
+  opacity = 0.72,
+  blur = 48,
+  saturate = 190,
+  radar = true, -- creative Pressure Radar + Quota Weather
+}
+
+local function clamp(n, lo, hi)
+  n = tonumber(n)
+  if not n then return lo end
+  if n < lo then return lo end
+  if n > hi then return hi end
+  return n
+end
+
+local function applyGlassPreset(key)
+  local p = GLASS_PRESETS[key]
+  if not p then return end
+  prefs.glass_preset = key
+  prefs.opacity = p.opacity
+  prefs.blur = p.blur
+  prefs.saturate = p.saturate
+end
+
+local function markGlassCustom()
+  prefs.glass_preset = "custom"
+end
 
 local function loadPrefs()
   local f = io.open(PREFS_PATH, "r")
-  if not f then return end
+  if not f then
+    applyGlassPreset(prefs.glass_preset)
+    return
+  end
   local raw = f:read("*a")
   f:close()
   local ok, data = pcall(hs.json.decode, raw or "")
-  if ok and type(data) == "table" then
-    if data.chart == "bar" or data.chart == "circle" then prefs.chart = data.chart end
-    if THEMES[data.theme] then prefs.theme = data.theme end
+  if not (ok and type(data) == "table") then
+    applyGlassPreset(prefs.glass_preset)
+    return
+  end
+  if data.chart == "bar" or data.chart == "circle" then prefs.chart = data.chart end
+  if THEMES[data.theme] then prefs.theme = data.theme end
+  if data.radar == false then prefs.radar = false else prefs.radar = true end
+  if type(data.glass_preset) == "string" and (GLASS_PRESETS[data.glass_preset] or data.glass_preset == "custom") then
+    prefs.glass_preset = data.glass_preset
+  end
+  if GLASS_PRESETS[prefs.glass_preset] and data.opacity == nil then
+    applyGlassPreset(prefs.glass_preset)
+  else
+    prefs.opacity = clamp(data.opacity or prefs.opacity, 0.35, 0.98)
+    prefs.blur = clamp(data.blur or prefs.blur, 8, 80)
+    prefs.saturate = clamp(data.saturate or prefs.saturate, 80, 240)
   end
 end
 
@@ -101,7 +173,15 @@ local function savePrefs()
   end
   local f = io.open(PREFS_PATH, "w")
   if not f then return end
-  f:write(hs.json.encode({ chart = prefs.chart, theme = prefs.theme }))
+  f:write(hs.json.encode({
+    chart = prefs.chart,
+    theme = prefs.theme,
+    glass_preset = prefs.glass_preset,
+    opacity = prefs.opacity,
+    blur = prefs.blur,
+    saturate = prefs.saturate,
+    radar = prefs.radar,
+  }))
   f:close()
 end
 
@@ -112,6 +192,18 @@ local function cycleList(list, cur)
     end
   end
   return list[1]
+end
+
+local function rgba(rgb, a)
+  if type(rgb) == "string" then return rgb end
+  local r, g, b = rgb[1] or 0, rgb[2] or 0, rgb[3] or 0
+  return string.format("rgba(%d,%d,%d,%.3f)", r, g, b, a)
+end
+
+local function glassLabel()
+  if prefs.glass_preset == "custom" then return "自訂" end
+  local p = GLASS_PRESETS[prefs.glass_preset]
+  return (p and p.name) or "玻璃"
 end
 
 loadPrefs()
@@ -280,6 +372,104 @@ local function heroRingsHTML(s)
   return html
 end
 
+-- Creative: Pressure Radar + Quota Weather (overall burn mood)
+local function pressureFromSnapshot(s)
+  s = s or {}
+  local host = s.host or {}
+  local cl = s.claude or {}
+  local cx = s.codex or {}
+  local go = s.opencode_go or {}
+  local gk = s.grok or {}
+  local parts = {}
+  local function add(key, label, ok, val)
+    local p = pct(val)
+    if ok and p ~= nil then
+      table.insert(parts, { key = key, label = label, pct = p })
+    end
+  end
+  add("C", "Claude", cl.ok, cl.five_hour_pct)
+  add("G", "Codex", cx.ok, cx.five_hour_pct)
+  add("O", "OpenCode", go.ok or go.live_status == "capped",
+    go.live_status == "capped" and 100 or go.used_pct)
+  add("K", "Grok", gk.ok, gk.used_pct)
+  local mem = pct(host.mem_pct)
+  local swap = tonumber(host.swap_mb) or 0
+  if mem and (swap >= 64 or mem >= 70) then
+    table.insert(parts, { key = "M", label = "Mem", pct = mem })
+  end
+  local maxP, sum, n = 0, 0, 0
+  local hottest = nil
+  for _, it in ipairs(parts) do
+    sum = sum + it.pct
+    n = n + 1
+    if it.pct >= maxP then
+      maxP = it.pct
+      hottest = it
+    end
+  end
+  -- Weighted: max pressure dominates (70%), average fills rest
+  local avg = n > 0 and (sum / n) or 0
+  local score = math.floor(maxP * 0.70 + avg * 0.30 + 0.5)
+  local weather, mood
+  if score < 35 then
+    weather, mood = "☀️ 晴朗", "低壓 · 放心用"
+  elseif score < 60 then
+    weather, mood = "⛅ 多雲", "中壓 · 留意尖峰"
+  elseif score < 85 then
+    weather, mood = "🌧️ 陣雨", "高壓 · 快觸頂"
+  else
+    weather, mood = "⛈️ 暴雨", "危急 · 節省額度"
+  end
+  return {
+    score = score,
+    max = maxP,
+    weather = weather,
+    mood = mood,
+    hottest = hottest,
+    parts = parts,
+  }
+end
+
+local function pressureRadarHTML(s)
+  if prefs.radar == false then return "" end
+  local pr = pressureFromSnapshot(s)
+  local col = barColor(pr.score)
+  local chips = ""
+  for _, it in ipairs(pr.parts) do
+    local c = barColor(it.pct)
+    chips = chips .. string.format(
+      '<span class="radar-chip" style="--c:%s"><b>%s</b>%d%%</span>',
+      c, esc(it.key), it.pct
+    )
+  end
+  if chips == "" then
+    chips = '<span class="radar-chip">尚無資料</span>'
+  end
+  local hot = pr.hottest
+      and string.format("最熱 %s %d%%", pr.hottest.label, pr.hottest.pct)
+    or "—"
+  return string.format([[
+    <section class="radar">
+      <div class="radar-left">
+        <div class="radar-ring">
+          <svg viewBox="0 0 36 36" class="ring">
+            <path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path class="ring-fg" stroke="%s" stroke-dasharray="%d, 100"
+              d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+          </svg>
+          <div class="radar-score" style="color:%s">%d</div>
+        </div>
+      </div>
+      <div class="radar-body">
+        <div class="radar-title">壓力雷達 · 創意</div>
+        <div class="radar-weather">%s</div>
+        <div class="radar-mood">%s · %s</div>
+        <div class="radar-chips">%s</div>
+      </div>
+    </section>
+  ]], col, pr.score, col, pr.score, esc(pr.weather), esc(pr.mood), esc(hot), chips)
+end
+
 local function buildHTML(s)
   s = s or {}
   local host = s.host or {}
@@ -416,9 +606,38 @@ local function buildHTML(s)
   local th = THEMES[prefs.theme] or THEMES.glass
   local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
   local themeLabel = th.name or prefs.theme
+  local gLabel = glassLabel()
+  local op = clamp(prefs.opacity, 0.35, 0.98)
+  local cardOp = clamp(op + 0.08, 0.40, 0.99)
+  local blur = clamp(prefs.blur, 8, 80)
+  local sat = clamp(prefs.saturate, 80, 240)
+  local bgCss = rgba(th.bg, op)
+  local cardCss = rgba(th.card, cardOp)
   local hero = ""
   if prefs.chart == "circle" then
     hero = heroRingsHTML(s)
+  end
+  local radar = pressureRadarHTML(s)
+  local auroraCSS = ""
+  if prefs.theme == "aurora" then
+    auroraCSS = [[
+  .shell.aurora::before {
+    content: "";
+    position: absolute; inset: 0; border-radius: 16px; pointer-events: none;
+    background:
+      radial-gradient(70% 50% at 15% 20%, rgba(56,189,248,0.28), transparent 55%),
+      radial-gradient(60% 45% at 85% 30%, rgba(244,114,182,0.22), transparent 50%),
+      radial-gradient(50% 40% at 50% 100%, rgba(52,211,153,0.16), transparent 55%);
+    animation: auroraShift 9s ease-in-out infinite alternate;
+    opacity: 0.9;
+  }
+  @keyframes auroraShift {
+    from { filter: hue-rotate(0deg); transform: scale(1); }
+    to { filter: hue-rotate(28deg); transform: scale(1.03); }
+  }
+  .shell.aurora { position: relative; overflow: hidden; }
+  .shell.aurora > * { position: relative; z-index: 1; }
+]]
   end
 
   return string.format([[<!DOCTYPE html>
@@ -439,6 +658,8 @@ local function buildHTML(s)
     --blue: %s;
     --glow1: %s;
     --glow2: %s;
+    --blur: %dpx;
+    --sat: %d%%;
   }
   * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
   html, body {
@@ -462,17 +683,18 @@ local function buildHTML(s)
     box-shadow:
       0 22px 56px rgba(0,0,0,0.48),
       0 0 0 0.5px rgba(0,0,0,0.28) inset;
-    backdrop-filter: blur(48px) saturate(190%%);
-    -webkit-backdrop-filter: blur(48px) saturate(190%%);
+    backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 7px;
   }
+%s
   .top {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    padding: 2px 4px 4px;
+    padding: 2px 4px 2px;
   }
   .title {
     font-size: 13px;
@@ -509,6 +731,87 @@ local function buildHTML(s)
     text-decoration: none;
   }
   .pill:active { opacity: 0.75; }
+  .lab {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+    padding: 2px;
+  }
+  .lab-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    background: var(--card);
+    border: 0.5px solid var(--card-border);
+    border-radius: 10px;
+    padding: 5px 7px;
+    font-size: 10px;
+    color: var(--label);
+    font-weight: 600;
+  }
+  .lab-row .lab-val {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    min-width: 2.4em;
+    text-align: center;
+  }
+  .step {
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 6px;
+    background: rgba(120,120,128,0.28);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .step:active { opacity: 0.7; }
+  .radar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    background: var(--card);
+    border: 0.5px solid var(--card-border);
+    border-radius: 14px;
+    padding: 10px 12px;
+  }
+  .radar-ring {
+    position: relative;
+    width: 64px; height: 64px;
+  }
+  .radar-ring .ring { width: 100%%; height: 100%%; }
+  .radar-score {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.04em;
+  }
+  .radar-title {
+    font-size: 10px; font-weight: 600; color: var(--label);
+    letter-spacing: 0.02em; margin-bottom: 2px;
+  }
+  .radar-weather {
+    font-size: 14px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  .radar-mood {
+    font-size: 11px; color: var(--sub); margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .radar-chips {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
+  }
+  .radar-chip {
+    font-size: 10px; font-weight: 600;
+    color: var(--text);
+    background: rgba(120,120,128,0.22);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  .radar-chip b { color: var(--c, var(--blue)); margin-right: 3px; }
   .hero-loaders {
     background: var(--card);
     border: 0.5px solid var(--card-border);
@@ -689,15 +992,38 @@ local function buildHTML(s)
 </style>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell%s">
     <div class="top">
       <div class="title">NexStatus<span>控制面</span></div>
-      <div class="stamp">%s<br/><span style="opacity:.8">%s · %s</span></div>
+      <div class="stamp">%s<br/><span style="opacity:.8">%s · %s · 透%d%%</span></div>
     </div>
     <div class="toolbar">
       <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
       <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
+      <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
+      <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
     </div>
+    <div class="lab">
+      <div class="lab-row">
+        <span>透明度</span>
+        <a class="step" href="#" data-action="opacity-down">−</a>
+        <span class="lab-val">%d%%</span>
+        <a class="step" href="#" data-action="opacity-up">+</a>
+      </div>
+      <div class="lab-row">
+        <span>模糊</span>
+        <a class="step" href="#" data-action="blur-down">−</a>
+        <span class="lab-val">%d</span>
+        <a class="step" href="#" data-action="blur-up">+</a>
+      </div>
+      <div class="lab-row">
+        <span>飽和</span>
+        <a class="step" href="#" data-action="sat-down">−</a>
+        <span class="lab-val">%d</span>
+        <a class="step" href="#" data-action="sat-up">+</a>
+      </div>
+    </div>
+    %s
     %s
     <div class="list">
       %s
@@ -705,7 +1031,7 @@ local function buildHTML(s)
     <div class="actions">
       <a class="btn primary" href="#" data-action="refresh">重新整理</a>
       <a class="btn" href="#" data-action="close">關閉面板</a>
-      <div class="hint">點「圖表／主題」可切換 · 此窗即控制面</div>
+      <div class="hint">圖表 · 主題 · 玻璃 · 透明度 / 模糊 / 飽和 · 壓力雷達</div>
     </div>
   </div>
   <script>
@@ -728,13 +1054,19 @@ local function buildHTML(s)
   </script>
 </body>
 </html>]],
-    th.color_scheme, th.bg, th.card, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
-    esc(updated), esc(chartLabel), esc(themeLabel),
-    esc(chartLabel), esc(themeLabel),
+    th.color_scheme, bgCss, cardCss, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
+    blur, sat,
+    auroraCSS,
+    (prefs.theme == "aurora") and " aurora" or "",
+    esc(updated), esc(chartLabel), esc(themeLabel), math.floor(op * 100 + 0.5),
+    esc(chartLabel), esc(themeLabel), esc(gLabel), prefs.radar and "開" or "關",
+    math.floor(op * 100 + 0.5), blur, sat,
+    radar,
     hero,
     cards
   )
 end
+
 
 local function positionPanel()
   if not panel then return end
@@ -750,6 +1082,79 @@ local function hidePanel()
   if panel then
     panel:hide()
   end
+end
+
+local function redrawPanel()
+  if panel then panel:html(buildHTML(readSnapshot())) end
+end
+
+local function handleAction(action)
+  if type(action) ~= "string" then return end
+  action = action:gsub("^/*", ""):gsub("[?#].*$", "")
+
+  if action == "refresh" then
+    refreshSnapshot(true)
+    redrawPanel()
+    M.refreshTitleOnly()
+  elseif action == "cycle-chart" then
+    prefs.chart = cycleList(CHART_ORDER, prefs.chart)
+    savePrefs()
+    redrawPanel()
+  elseif action == "cycle-theme" then
+    prefs.theme = cycleList(THEME_ORDER, prefs.theme)
+    savePrefs()
+    redrawPanel()
+  elseif action == "cycle-glass" then
+    local cur = prefs.glass_preset
+    if cur == "custom" then cur = "crystal" end
+    applyGlassPreset(cycleList(GLASS_PRESET_ORDER, cur))
+    savePrefs()
+    redrawPanel()
+  elseif action == "toggle-radar" then
+    prefs.radar = not prefs.radar
+    savePrefs()
+    redrawPanel()
+  elseif action == "opacity-up" then
+    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) + 0.05, 0.35, 0.98) * 100 + 0.5) / 100
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "opacity-down" then
+    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) - 0.05, 0.35, 0.98) * 100 + 0.5) / 100
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "blur-up" then
+    prefs.blur = clamp((prefs.blur or 48) + 6, 8, 80)
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "blur-down" then
+    prefs.blur = clamp((prefs.blur or 48) - 6, 8, 80)
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "sat-up" then
+    prefs.saturate = clamp((prefs.saturate or 190) + 15, 80, 240)
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "sat-down" then
+    prefs.saturate = clamp((prefs.saturate or 190) - 15, 80, 240)
+    markGlassCustom()
+    savePrefs()
+    redrawPanel()
+  elseif action == "close" then
+    hidePanel()
+  end
+  hs.printf("[nexstatus] action=%s theme=%s glass=%s op=%.2f blur=%d sat=%d",
+    action, prefs.theme, tostring(prefs.glass_preset),
+    prefs.opacity or 0, prefs.blur or 0, prefs.saturate or 0)
+end
+
+-- Public: fire a panel action
+function M.fire(action)
+  handleAction(action)
 end
 
 local function showPanel()
@@ -772,23 +1177,7 @@ local function showPanel()
       action = action:gsub("^/*", ""):gsub("[?#].*$", "")
       hs.printf("[nexstatus] bridge action=%s", action)
 
-      if action == "refresh" then
-        refreshSnapshot(true)
-        if panel then panel:html(buildHTML(readSnapshot())) end
-        M.refreshTitleOnly()
-      elseif action == "cycle-chart" then
-        prefs.chart = cycleList(CHART_ORDER, prefs.chart)
-        savePrefs()
-        if panel then panel:html(buildHTML(readSnapshot())) end
-        hs.printf("[nexstatus] chart=%s", prefs.chart)
-      elseif action == "cycle-theme" then
-        prefs.theme = cycleList(THEME_ORDER, prefs.theme)
-        savePrefs()
-        if panel then panel:html(buildHTML(readSnapshot())) end
-        hs.printf("[nexstatus] theme=%s", prefs.theme)
-      elseif action == "close" then
-        hidePanel()
-      end
+      handleAction(action)
     end)
 
     panel = hs.webview.new(hs.geometry.rect(0, 0, PANEL_W, PANEL_H), {
@@ -829,25 +1218,6 @@ function M.openPanel()
   showPanel()
 end
 
--- Public: fire a panel action (refresh / cycle-chart / cycle-theme / close)
-function M.fire(action)
-  if type(action) ~= "string" then return end
-  if action == "refresh" then
-    refreshSnapshot(true)
-    if panel then panel:html(buildHTML(readSnapshot())) end
-    M.refreshTitleOnly()
-  elseif action == "cycle-chart" then
-    prefs.chart = cycleList(CHART_ORDER, prefs.chart)
-    savePrefs()
-    if panel then panel:html(buildHTML(readSnapshot())) end
-  elseif action == "cycle-theme" then
-    prefs.theme = cycleList(THEME_ORDER, prefs.theme)
-    savePrefs()
-    if panel then panel:html(buildHTML(readSnapshot())) end
-  elseif action == "close" then
-    hidePanel()
-  end
-end
 
 function M.refreshTitleOnly()
   if not item then return end
@@ -882,8 +1252,16 @@ function M.refreshTitleOnly()
 
   -- Force uppercase chips only (C70% G49% K10% M8%) — never lowercase
   local title = table.concat(parts, " "):upper()
+  local pr = pressureFromSnapshot(s)
+  if pr.score >= 90 then
+    title = "⚡" .. title
+  elseif pr.score >= 75 then
+    title = "!" .. title
+  end
   local tip = string.format(
-    "NexStatus\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下看完整面板",
+    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下看完整面板",
+    pr.score,
+    pr.weather,
     pctText(cl.five_hour_pct),
     pctText(cx.five_hour_pct),
     pctText(gk.used_pct),

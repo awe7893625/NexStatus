@@ -263,6 +263,165 @@
       display: grid; place-items: center; font-size: 11px; font-weight: 700;
       margin-top: 2px;
     }
+    /* Customization catalog */
+    .cust-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      margin-bottom: 28px;
+    }
+    .cust-table th, .cust-table td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .cust-table th {
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--soft);
+      font-weight: 600;
+    }
+    .cust-table td:first-child {
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .cust-table code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px;
+      color: #9ec5ff;
+      background: rgba(10,132,255,0.10);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .tag {
+      display: inline-block;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.03em;
+      padding: 2px 8px; border-radius: 999px;
+      margin-right: 6px;
+    }
+    .tag-new {
+      background: rgba(191,90,242,0.18); color: #e0b3ff;
+    }
+    .tag-core {
+      background: rgba(10,132,255,0.16); color: #8ec5ff;
+    }
+    /* Interactive glass lab demo */
+    .lab-demo {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 22px;
+      margin-bottom: 48px;
+      align-items: stretch;
+    }
+    @media (max-width: 860px) { .lab-demo { grid-template-columns: 1fr; } }
+    .lab-controls {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.03);
+      padding: 20px;
+    }
+    .lab-controls h3 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.02em; }
+    .lab-controls p.lead {
+      margin: 0 0 18px; font-size: 14px; color: var(--muted); line-height: 1.5;
+    }
+    .slider-row {
+      display: grid;
+      grid-template-columns: 72px 1fr 48px;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .slider-row output {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px; color: var(--text); text-align: right;
+    }
+    input[type=range] {
+      width: 100%;
+      accent-color: var(--blue);
+    }
+    .preset-row {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      margin: 14px 0 8px;
+    }
+    .preset-row button {
+      appearance: none; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.05);
+      color: var(--text); font: inherit; font-size: 12px; font-weight: 600;
+      border-radius: 999px; padding: 6px 12px; cursor: pointer;
+    }
+    .preset-row button:hover { background: rgba(255,255,255,0.10); }
+    .preset-row button.active {
+      background: rgba(10,132,255,0.22);
+      border-color: rgba(10,132,255,0.45);
+    }
+    .lab-stage {
+      position: relative;
+      min-height: 320px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Crect fill='%231a2744' width='160' height='160'/%3E%3Ccircle cx='40' cy='40' r='30' fill='%230a84ff' opacity='.35'/%3E%3Ccircle cx='120' cy='90' r='40' fill='%23bf5af2' opacity='.3'/%3E%3Ccircle cx='70' cy='130' r='28' fill='%2330d158' opacity='.25'/%3E%3C/svg%3E"),
+        linear-gradient(135deg, #1a2744, #0b1020 55%, #1c1230);
+      background-size: 160px 160px, cover;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+    }
+    .lab-panel {
+      width: min(300px, 100%);
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background:
+        radial-gradient(120% 80% at 0% 0%, rgba(10,132,255,0.18), transparent 52%),
+        radial-gradient(100% 70% at 100% 100%, rgba(191,90,242,0.14), transparent 48%),
+        rgba(28, 28, 30, var(--demo-op, 0.72));
+      backdrop-filter: blur(var(--demo-blur, 48px)) saturate(var(--demo-sat, 190%));
+      -webkit-backdrop-filter: blur(var(--demo-blur, 48px)) saturate(var(--demo-sat, 190%));
+      box-shadow: 0 22px 56px rgba(0,0,0,0.45);
+      padding: 14px 14px 16px;
+      color: #f5f5f7;
+    }
+    .lab-panel .lp-top {
+      display: flex; justify-content: space-between; font-size: 12px; font-weight: 600;
+      margin-bottom: 10px;
+    }
+    .lab-panel .lp-top span { color: rgba(235,235,245,0.55); font-weight: 500; }
+    .lab-panel .lp-radar {
+      display: flex; gap: 12px; align-items: center;
+      background: rgba(44,44,46,0.55);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+    }
+    .lp-score {
+      width: 48px; height: 48px; border-radius: 50%;
+      border: 3px solid #0a84ff;
+      display: grid; place-items: center;
+      font-weight: 700; font-size: 15px;
+      font-variant-numeric: tabular-nums;
+    }
+    .lp-weather { font-size: 14px; font-weight: 700; }
+    .lp-mood { font-size: 11px; color: rgba(235,235,245,0.55); margin-top: 2px; }
+    .lp-row {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 12px; padding: 7px 0;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .lp-row b { font-variant-numeric: tabular-nums; }
+    .creative-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      margin-bottom: 48px;
+    }
+    @media (max-width: 860px) { .creative-grid { grid-template-columns: 1fr; } }
     footer {
       display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
       padding-top: 22px; border-top: 1px solid var(--line);
@@ -350,7 +509,113 @@
       </div>
     </section>
 
-    <p class="section-title">Styles you can switch</p>
+    <p class="section-title" id="customize">Every customization in the panel</p>
+    <p style="margin:-6px 0 16px;color:var(--muted);font-size:14px;line-height:1.5;max-width:62ch">
+      Click the MenuBar title → the panel <b style="color:var(--text)">is</b> the settings surface.
+      All of these persist in <code style="color:var(--text);font-family:JetBrains Mono,monospace;font-size:12px">~/.config/nexstatus/prefs.json</code> (local only, never committed).
+    </p>
+    <table class="cust-table">
+      <thead>
+        <tr><th>Control</th><th>What you can set</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="tag tag-core">CORE</span> 圖表 Chart</td>
+          <td><b>長條</b> bars · <b>圓圈</b> circular percentage loaders (C / G / K / M rings)</td>
+          <td>Pill <code>圖表</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-core">CORE</span> 主題 Theme</td>
+          <td><b>Glass</b> · <b>Paper</b> · <b>Mono</b> · <b>Nord</b> · <b>Aurora</b> <span class="tag tag-new">NEW</span> polar-light animated glass</td>
+          <td>Pill <code>主題</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-new">NEW</span> 玻璃 Glass preset</td>
+          <td><b>柔霧 Soft</b> · <b>水晶 Crystal</b> · <b>厚玻 Dense</b> · <b>煙霧 Smoke</b> — one-tap recipes for opacity + blur + saturate</td>
+          <td>Pill <code>玻璃</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-new">NEW</span> 透明度 Opacity</td>
+          <td>35% → 98% in 5% steps — how solid the panel background is</td>
+          <td>Glass Lab <code>− / +</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-new">NEW</span> 模糊 Blur</td>
+          <td>8 → 80px backdrop blur — true frosted-glass feel</td>
+          <td>Glass Lab <code>− / +</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-new">NEW</span> 飽和 Saturate</td>
+          <td>80 → 240% color pop behind the glass</td>
+          <td>Glass Lab <code>− / +</code></td>
+        </tr>
+        <tr>
+          <td><span class="tag tag-new">NEW</span> 壓力雷達 Radar</td>
+          <td>On / off — creative overall burn score + “quota weather” (晴朗 → 暴雨)</td>
+          <td>Pill <code>雷達</code></td>
+        </tr>
+        <tr>
+          <td>MenuBar alert</td>
+          <td>When pressure ≥ 75% show <code>!</code>, ≥ 90% show <code>⚡</code> before chips</td>
+          <td>Automatic</td>
+        </tr>
+        <tr>
+          <td>MenuBar chips</td>
+          <td><code>C##% G##% K##%</code> (+ <code>M##%</code> when swap ≥ 64MB or RAM ≥ 80%)</td>
+          <td>Always live</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="section-title">Try the Glass Lab <span style="font-weight:500;color:var(--soft);text-transform:none;letter-spacing:0">(live demo)</span></p>
+    <div class="lab-demo">
+      <div class="lab-controls">
+        <h3>Glass Lab</h3>
+        <p class="lead">Same knobs as the real panel — drag to preview frosted glass before you install.</p>
+        <div class="preset-row" id="presets">
+          <button type="button" data-op="0.88" data-blur="22" data-sat="130">柔霧 Soft</button>
+          <button type="button" class="active" data-op="0.72" data-blur="48" data-sat="190">水晶 Crystal</button>
+          <button type="button" data-op="0.93" data-blur="64" data-sat="155">厚玻 Dense</button>
+          <button type="button" data-op="0.52" data-blur="36" data-sat="115">煙霧 Smoke</button>
+        </div>
+        <div class="slider-row">
+          <label for="op">透明度</label>
+          <input id="op" type="range" min="35" max="98" value="72" />
+          <output id="opOut">72%</output>
+        </div>
+        <div class="slider-row">
+          <label for="blur">模糊</label>
+          <input id="blur" type="range" min="8" max="80" value="48" />
+          <output id="blurOut">48px</output>
+        </div>
+        <div class="slider-row">
+          <label for="sat">飽和</label>
+          <input id="sat" type="range" min="80" max="240" value="190" />
+          <output id="satOut">190%</output>
+        </div>
+      </div>
+      <div class="lab-stage" id="labStage">
+        <div class="lab-panel" id="labPanel">
+          <div class="lp-top">
+            <div>NexStatus <span>控制面</span></div>
+            <span>Glass Lab</span>
+          </div>
+          <div class="lp-radar">
+            <div class="lp-score">42</div>
+            <div>
+              <div class="lp-weather">⛅ 多雲</div>
+              <div class="lp-mood">壓力雷達 · 中壓 · 留意尖峰</div>
+            </div>
+          </div>
+          <div class="lp-row"><span>C Claude</span><b style="color:var(--green)">28%</b></div>
+          <div class="lp-row"><span>G Codex</span><b style="color:var(--blue)">49%</b></div>
+          <div class="lp-row"><span>K Grok</span><b style="color:var(--purple)">11%</b></div>
+          <div class="lp-row"><span>M Mem</span><b style="color:var(--blue)">22%</b></div>
+        </div>
+      </div>
+    </div>
+
+    <p class="section-title">Chart styles</p>
     <div class="feature" style="padding:16px;margin-bottom:16px">
       <h3 style="margin:0 0 12px">Circular percentage loaders</h3>
       <p style="margin:0 0 14px;color:var(--muted);font-size:14px">Tap <b style="color:var(--text)">圖表</b> in the panel to switch between long bars and rings — like status gauges, not just text.</p>
@@ -367,6 +632,26 @@
       </div>
     </div>
 
+    <p class="section-title">Creative edition <span style="font-weight:500;color:var(--soft);text-transform:none;letter-spacing:0">— ship-with-NexStatus</span></p>
+    <div class="creative-grid">
+      <div class="feature">
+        <h3>壓力雷達 Pressure Radar</h3>
+        <p>One score (0–100) blends max quota pressure with average burn across Claude / Codex / OpenCode / Grok / Mem. Color ring + chip strip so you feel the room temperature of your AI stack.</p>
+      </div>
+      <div class="feature">
+        <h3>配額天氣 Quota Weather</h3>
+        <p>☀️ 晴朗 → ⛅ 多雲 → 🌧️ 陣雨 → ⛈️ 暴雨. Tooltip and radar card speak weather instead of only bare percentages.</p>
+      </div>
+      <div class="feature">
+        <h3>Aurora theme</h3>
+        <p>Polar-light glass with a slow hue-shift glow — a creative fifth theme beyond Glass / Paper / Mono / Nord. Toggle from <code style="color:var(--text);font-family:JetBrains Mono,monospace;font-size:12px">主題</code>.</p>
+      </div>
+      <div class="feature">
+        <h3>Storm MenuBar</h3>
+        <p>When pressure spikes, MenuBar gets <code style="color:var(--text);font-family:JetBrains Mono,monospace;font-size:12px">!</code> or <code style="color:var(--text);font-family:JetBrains Mono,monospace;font-size:12px">⚡</code> so you notice before a rate-limit mid-refactor.</p>
+      </div>
+    </div>
+
     <p class="section-title">Why NexStatus</p>
     <div class="grid">
       <div class="feature">
@@ -374,8 +659,8 @@
         <p>Stop opening five apps to check whether Claude, Codex, Go, or Grok is about to rate-limit you.</p>
       </div>
       <div class="feature">
-        <h3>Switchable styles</h3>
-        <p>Long bars or circular gauges. Themes: Glass, Paper, Mono, Nord — cycle from the panel toolbar.</p>
+        <h3>Fully customizable glass</h3>
+        <p>Chart style, five themes, four glass recipes, plus live opacity / blur / saturate — your MenuBar, your frost.</p>
       </div>
       <div class="feature">
         <h3>Privacy first</h3>
@@ -417,5 +702,60 @@ cd NexStatus
       <div>Built for people who live in Claude · Codex · OpenCode · Grok</div>
     </footer>
   </div>
+  <script>
+    (function () {
+      var panel = document.getElementById("labPanel");
+      var op = document.getElementById("op");
+      var blur = document.getElementById("blur");
+      var sat = document.getElementById("sat");
+      var opOut = document.getElementById("opOut");
+      var blurOut = document.getElementById("blurOut");
+      var satOut = document.getElementById("satOut");
+      if (!panel || !op) return;
+
+      function apply() {
+        var o = Number(op.value) / 100;
+        var b = Number(blur.value);
+        var s = Number(sat.value);
+        panel.style.setProperty("--demo-op", o.toFixed(2));
+        panel.style.setProperty("--demo-blur", b + "px");
+        panel.style.setProperty("--demo-sat", s + "%");
+        // also write inline for browsers weak on custom props in backdrop-filter
+        panel.style.background =
+          "radial-gradient(120% 80% at 0% 0%, rgba(10,132,255,0.18), transparent 52%)," +
+          "radial-gradient(100% 70% at 100% 100%, rgba(191,90,242,0.14), transparent 48%)," +
+          "rgba(28, 28, 30, " + o.toFixed(2) + ")";
+        panel.style.backdropFilter = "blur(" + b + "px) saturate(" + s + "%)";
+        panel.style.webkitBackdropFilter = "blur(" + b + "px) saturate(" + s + "%)";
+        opOut.textContent = Math.round(o * 100) + "%";
+        blurOut.textContent = b + "px";
+        satOut.textContent = s + "%";
+      }
+
+      ;[op, blur, sat].forEach(function (el) {
+        el.addEventListener("input", function () {
+          document.querySelectorAll("#presets button").forEach(function (b) {
+            b.classList.remove("active");
+          });
+          apply();
+        });
+      });
+
+      document.querySelectorAll("#presets button").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          document.querySelectorAll("#presets button").forEach(function (b) {
+            b.classList.remove("active");
+          });
+          btn.classList.add("active");
+          op.value = Math.round(Number(btn.dataset.op) * 100);
+          blur.value = btn.dataset.blur;
+          sat.value = btn.dataset.sat;
+          apply();
+        });
+      });
+
+      apply();
+    })();
+  </script>
 </body>
 </html>

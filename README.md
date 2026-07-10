@@ -9,7 +9,7 @@
 🌐 **Landing page:** https://awe7893625.github.io/NexStatus/  
 📦 **Source:** https://github.com/awe7893625/NexStatus
 
-See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with **bar or circle** progress, and **switchable color themes**.
+See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with **bar or circle** progress, **switchable themes**, **live glass lab** (opacity / blur / saturate), and creative **Pressure Radar** + **Quota Weather**.
 
 ```text
 C70% G49% K10% M8%
@@ -33,15 +33,22 @@ C70% G49% K10% M8%
   <em>macOS MenuBar · Hammerspoon · Python 3 · MIT</em>
 </p>
 
-### Styles (switchable in the panel)
+### Customization (everything in the panel)
 
 | Control | Options |
 |---------|---------|
-| **圖表** | **長條** bars · **圓圈** circular percentage rings |
-| **主題** | **Glass** · **Paper** · **Mono** · **Nord** |
+| **圖表** Chart | **長條** bars · **圓圈** circular percentage rings |
+| **主題** Theme | **Glass** · **Paper** · **Mono** · **Nord** · **Aurora** (creative polar-light) |
+| **玻璃** Glass preset | **柔霧 Soft** · **水晶 Crystal** · **厚玻 Dense** · **煙霧 Smoke** |
+| **透明度** Opacity | 35% → 98% (5% steps) |
+| **模糊** Blur | 8 → 80 px backdrop blur |
+| **飽和** Saturate | 80 → 240% color pop |
+| **雷達** Pressure Radar | On/off — overall burn score + ☀️⛅🌧️⛈️ quota weather |
+| **MenuBar alert** | `!` when pressure ≥ 75 · `⚡` when ≥ 90 |
 
-Click **圖表：長條／圓圈** or **主題：…** at the top of the control panel.  
-Prefs: `~/.config/nexstatus/prefs.json` (local only, never committed).
+Click the MenuBar title — the panel **is** the settings surface.  
+Prefs: `~/.config/nexstatus/prefs.json` (local only, never committed).  
+Landing page lists every control + a live Glass Lab demo: https://awe7893625.github.io/NexStatus/#customize
 
 ---
 
