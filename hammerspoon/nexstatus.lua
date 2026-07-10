@@ -483,35 +483,37 @@ local function buildHTML(s)
   .pill:active { opacity: 0.75; }
   .rings {
     display: flex;
-    gap: 10px;
+    gap: 14px;
     flex-wrap: wrap;
-    margin-top: 8px;
+    margin-top: 10px;
+    justify-content: flex-start;
   }
-  .ring-item { width: 72px; text-align: center; }
-  .ring-wrap { position: relative; width: 56px; height: 56px; margin: 0 auto; }
-  .ring { width: 56px; height: 56px; transform: rotate(0deg); }
+  .ring-item { width: 84px; text-align: center; }
+  .ring-wrap { position: relative; width: 72px; height: 72px; margin: 0 auto; }
+  .ring { width: 72px; height: 72px; }
   .ring-bg {
     fill: none;
     stroke: var(--track);
-    stroke-width: 3.2;
+    stroke-width: 2.8;
   }
   .ring-fg {
     fill: none;
-    stroke-width: 3.2;
+    stroke-width: 2.8;
     stroke-linecap: round;
     transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .ring-num {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700;
+    font-size: 13px; font-weight: 700;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
   }
   .ring-label {
-    margin-top: 4px;
+    margin-top: 6px;
     font-size: 10px;
     color: var(--label);
-    font-weight: 500;
+    font-weight: 600;
     line-height: 1.2;
   }
   .list {

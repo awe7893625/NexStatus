@@ -20,21 +20,28 @@ C70% G49% K10% M8%
 ```
 
 <p align="center">
-  <img src="docs/assets/panel-preview-sm.png" alt="NexStatus glass control panel" width="320" />
+  <img src="docs/assets/loaders-circle.png" alt="NexStatus circular percentage loaders" width="720" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/panel-preview-sm.png" alt="NexStatus bar panel" width="280" />
+  &nbsp;
+  <img src="docs/assets/panel-circle-sm.png" alt="NexStatus circle panel" width="280" />
 </p>
 
 <p align="center">
   <em>macOS MenuBar · Hammerspoon · Python 3 · MIT</em>
 </p>
 
-### Styles
+### Styles (switchable in the panel)
 
-| Control (in panel) | Options |
-|--------------------|---------|
-| **圖表** | `長條` progress bars · `圓圈` ring gauges |
-| **主題** | `Glass` · `Paper` · `Mono` · `Nord` |
+| Control | Options |
+|---------|---------|
+| **圖表** | **長條** bars · **圓圈** circular percentage rings |
+| **主題** | **Glass** · **Paper** · **Mono** · **Nord** |
 
-Prefs are stored locally at `~/.config/nexstatus/prefs.json` (not committed).
+Click **圖表：長條／圓圈** or **主題：…** at the top of the control panel.  
+Prefs: `~/.config/nexstatus/prefs.json` (local only, never committed).
 
 ---
 
