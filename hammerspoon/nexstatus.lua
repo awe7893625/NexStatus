@@ -1121,6 +1121,9 @@ local function hidePanel()
   end
 end
 
+-- MenuBar open-click is outside the panel; ignore outside-dismiss briefly after show.
+local suppressOutsideUntil = 0
+
 local function redrawPanel()
   if panel then panel:html(buildHTML(readSnapshot())) end
 end
@@ -1250,14 +1253,26 @@ local function showPanel()
   positionPanel()
   panel:show()
   panel:bringToFront(true)
+  -- Grace period: MenuBar click is outside the panel frame; without this,
+  -- the outside-dismiss eventtap closes the dashboard on the same click.
+  suppressOutsideUntil = hs.timer.secondsSinceEpoch() + 0.55
   if panel.hswindow and panel:hswindow() then
-    panel:hswindow():focus()
+    pcall(function() panel:hswindow():focus() end)
   end
+  hs.printf("[nexstatus] dashboard shown")
 end
 
 local function togglePanel()
-  if panel and panel:hswindow() and panel:hswindow():isVisible() then
+  local visible = false
+  if panel then
+    pcall(function()
+      local w = panel:hswindow()
+      visible = w and w:isVisible() or false
+    end)
+  end
+  if visible then
     hidePanel()
+    hs.printf("[nexstatus] dashboard hidden")
   else
     showPanel()
   end
@@ -1348,23 +1363,46 @@ function M.start()
     return
   end
 
-  -- Click MenuBar chips → one tall dashboard (data + customize on same panel)
+  -- Critical: no setMenu — a menu steals the click and user never sees the dashboard.
+  pcall(function() item:setMenu(nil) end)
+
+  -- Click MenuBar title chips → toggle the one tall data dashboard
   item:setClickCallback(function()
+    hs.printf("[nexstatus] menubar clicked → toggle dashboard")
     togglePanel()
   end)
-  -- No setMenu: dropdown would steal the click. All settings live in the panel footer.
 
+  -- Warm snapshot so first open is instant
+  pcall(function() refreshSnapshot(false) end)
   M.refresh()
   timer = hs.timer.doEvery(15, function()
     M.refresh()
   end)
 
-  -- Click outside panel to dismiss (best-effort)
-  M._tap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(e)
-    if not (panel and panel:hswindow() and panel:hswindow():isVisible()) then
+  -- Click outside panel to dismiss — but never on the open-click itself
+  if M._tap then
+    pcall(function() M._tap:stop() end)
+    M._tap = nil
+  end
+  M._tap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(_e)
+    if hs.timer.secondsSinceEpoch() < suppressOutsideUntil then
       return false
     end
+    if not panel then return false end
+    local visible = false
+    pcall(function()
+      local w = panel:hswindow()
+      visible = w and w:isVisible() or false
+    end)
+    if not visible then return false end
+
     local loc = hs.mouse.absolutePosition()
+    -- Ignore clicks on the macOS menu bar strip (where NexStatus lives)
+    local sf = hs.screen.mainScreen():fullFrame()
+    if loc.y < sf.y + 40 then
+      return false
+    end
+
     local f = panel:frame()
     if loc.x < f.x or loc.x > f.x + f.w or loc.y < f.y or loc.y > f.y + f.h then
       hidePanel()
@@ -1373,7 +1411,7 @@ function M.start()
   end)
   M._tap:start()
 
-  hs.printf("[nexstatus] NexStatus MenuBar: click opens unified dashboard (root=%s)", ROOT)
+  hs.printf("[nexstatus] NexStatus ready — click MenuBar C%% G%% K%% to open dashboard (root=%s)", ROOT)
 end
 
 function M.stop()
