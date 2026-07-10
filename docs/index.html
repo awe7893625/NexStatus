@@ -422,6 +422,76 @@
       margin-bottom: 48px;
     }
     @media (max-width: 860px) { .creative-grid { grid-template-columns: 1fr; } }
+    .shot {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+    .shot img {
+      display: block; width: 100%; height: auto;
+    }
+    .shot .cap {
+      padding: 12px 16px 14px;
+      font-size: 13px; color: var(--muted); line-height: 1.45;
+    }
+    .shot .cap b { color: var(--text); }
+    .gallery-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 48px;
+    }
+    .gallery-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-bottom: 48px;
+    }
+    @media (max-width: 860px) {
+      .gallery-2, .gallery-3 { grid-template-columns: 1fr; }
+    }
+    /* Live energy gauges on page */
+    .energy-live {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    @media (max-width: 720px) { .energy-live { grid-template-columns: 1fr 1fr; } }
+    .eg {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      padding: 20px 12px 16px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .eg::before {
+      content: ""; position: absolute; inset: -30%;
+      background: radial-gradient(circle at 50% 35%, var(--glow), transparent 55%);
+      opacity: 0.5; pointer-events: none;
+    }
+    .eg svg { width: 110px; height: 110px; transform: rotate(-90deg); position: relative; }
+    .eg .eg-wrap { position: relative; width: 110px; height: 110px; margin: 0 auto 10px; }
+    .eg .eg-num {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 22px; font-weight: 700; letter-spacing: -0.04em;
+      /* svg ring is rotated; number stays upright */
+    }
+    .eg .eg-label { font-size: 13px; font-weight: 700; position: relative; }
+    .eg .eg-hint { font-size: 11px; color: var(--soft); margin-top: 2px; position: relative; }
+    .sketch-frame {
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: #f6f4ef;
+      overflow: hidden;
+    }
+    .sketch-frame img { display: block; width: 100%; height: auto; filter: contrast(1.05); }
+    .nav-links a.btn[href="#gallery"] { border-color: rgba(10,132,255,0.35); }
     footer {
       display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
       padding-top: 22px; border-top: 1px solid var(--line);
@@ -434,9 +504,10 @@
     <nav>
       <div class="brand"><span class="logo" aria-hidden="true"></span> NexStatus</div>
       <div class="nav-links">
+        <a class="btn" href="#gallery">Gallery</a>
+        <a class="btn" href="#sketch">手繪</a>
         <a class="btn" href="https://github.com/awe7893625/NexStatus">GitHub</a>
-        <a class="btn" href="https://github.com/awe7893625/NexStatus#install">Docs</a>
-        <a class="btn primary" href="https://github.com/awe7893625/NexStatus#install">Install</a>
+        <a class="btn primary" href="#install">Install</a>
       </div>
     </nav>
 
@@ -615,21 +686,110 @@
       </div>
     </div>
 
-    <p class="section-title">Chart styles</p>
-    <div class="feature" style="padding:16px;margin-bottom:16px">
-      <h3 style="margin:0 0 12px">Circular percentage loaders</h3>
-      <p style="margin:0 0 14px;color:var(--muted);font-size:14px">Tap <b style="color:var(--text)">圖表</b> in the panel to switch between long bars and rings — like status gauges, not just text.</p>
-      <img src="assets/loaders-circle.png" alt="NexStatus circular percentage loaders" style="width:100%;border-radius:12px;border:1px solid var(--line);background:#fff" />
+    <p class="section-title" id="gallery">Style pages · 指標面一覽</p>
+    <p style="margin:-6px 0 16px;color:var(--muted);font-size:14px;line-height:1.5;max-width:64ch">
+      不是只放一張截圖——下面是 NexStatus 的各種「頁面感」：長條、圓形能量圖、壓力雷達、Paper / Nord / Aurora 主題。
+    </p>
+    <div class="shot">
+      <img src="assets/style-gallery.png" alt="NexStatus six style pages gallery" />
+      <div class="cap"><b>六格風格牆</b> — Bars · 圓形能量 · 壓力雷達 · Paper · Nord · Aurora</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:48px">
-      <div class="feature" style="padding:12px">
-        <h3 style="margin-bottom:10px">Bars · Glass</h3>
-        <img src="assets/panel-preview.png" alt="NexStatus bar style panel" style="width:100%;border-radius:12px;border:1px solid var(--line)" />
+
+    <p class="section-title" id="energy">圓形能量圖 · Circular Energy Gauges</p>
+    <p style="margin:-6px 0 16px;color:var(--muted);font-size:14px;line-height:1.5;max-width:64ch">
+      厚描邊 + 微光環，一眼讀 C / G / K / M 用量。面板裡點 <b style="color:var(--text)">圖表 → 圓圈</b> 即切換。
+    </p>
+    <div class="energy-live" aria-label="Live circular energy gauges">
+      <div class="eg" style="--c:#D97757;--glow:rgba(217,119,87,0.35)">
+        <div class="eg-wrap">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3.2"/>
+            <circle cx="18" cy="18" r="14" fill="none" stroke="#D97757" stroke-width="3.2" stroke-linecap="round"
+              pathLength="100" stroke-dasharray="72 100" style="filter:drop-shadow(0 0 6px #D97757)"/>
+          </svg>
+          <div class="eg-num" style="color:#D97757">72%</div>
+        </div>
+        <div class="eg-label">C · Claude</div>
+        <div class="eg-hint">5h window</div>
       </div>
-      <div class="feature" style="padding:12px">
-        <h3 style="margin-bottom:10px">Circles · Glass</h3>
-        <img src="assets/panel-circle.png" alt="NexStatus circle style panel" style="width:100%;border-radius:12px;border:1px solid var(--line)" />
+      <div class="eg" style="--c:#10A37F;--glow:rgba(16,163,127,0.35)">
+        <div class="eg-wrap">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3.2"/>
+            <circle cx="18" cy="18" r="14" fill="none" stroke="#10A37F" stroke-width="3.2" stroke-linecap="round"
+              pathLength="100" stroke-dasharray="49 100" style="filter:drop-shadow(0 0 6px #10A37F)"/>
+          </svg>
+          <div class="eg-num" style="color:#10A37F">49%</div>
+        </div>
+        <div class="eg-label">G · Codex</div>
+        <div class="eg-hint">5h window</div>
       </div>
+      <div class="eg" style="--c:#BF5AF2;--glow:rgba(191,90,242,0.35)">
+        <div class="eg-wrap">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3.2"/>
+            <circle cx="18" cy="18" r="14" fill="none" stroke="#BF5AF2" stroke-width="3.2" stroke-linecap="round"
+              pathLength="100" stroke-dasharray="11 100" style="filter:drop-shadow(0 0 6px #BF5AF2)"/>
+          </svg>
+          <div class="eg-num" style="color:#BF5AF2">11%</div>
+        </div>
+        <div class="eg-label">K · Grok</div>
+        <div class="eg-hint">monthly credits</div>
+      </div>
+      <div class="eg" style="--c:#0A84FF;--glow:rgba(10,132,255,0.35)">
+        <div class="eg-wrap">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3.2"/>
+            <circle cx="18" cy="18" r="14" fill="none" stroke="#0A84FF" stroke-width="3.2" stroke-linecap="round"
+              pathLength="100" stroke-dasharray="22 100" style="filter:drop-shadow(0 0 6px #0A84FF)"/>
+          </svg>
+          <div class="eg-num" style="color:#0A84FF">22%</div>
+        </div>
+        <div class="eg-label">M · Memory</div>
+        <div class="eg-hint">host pressure</div>
+      </div>
+    </div>
+    <div class="shot" style="margin-bottom:48px">
+      <img src="assets/energy-rings.png" alt="NexStatus circular energy gauges C G K M" />
+      <div class="cap"><b>圓形能量圖海報</b> — 厚環 + glow，對齊 MenuBar 的 C / G / K / M</div>
+    </div>
+
+    <div class="gallery-2">
+      <div class="shot" style="margin:0">
+        <img src="assets/loaders-circle.png" alt="Light circular percentage loaders" style="background:#fff" />
+        <div class="cap"><b>淺底 loader 卡</b> — 參考式 circular percentage loaders</div>
+      </div>
+      <div class="shot" style="margin:0">
+        <img src="assets/panel-circle.png" alt="Panel circle style glass" />
+        <div class="cap"><b>面板 · 圓圈模式</b> — 控制面裡的能量環 + 列表</div>
+      </div>
+    </div>
+    <div class="gallery-2" style="margin-top:16px">
+      <div class="shot" style="margin:0">
+        <img src="assets/panel-preview.png" alt="Panel bar style glass" />
+        <div class="cap"><b>面板 · 長條模式</b> — 經典 control-center meters</div>
+      </div>
+      <div class="shot" style="margin:0">
+        <img src="assets/panel-circle-paper.png" alt="Panel circle paper theme" />
+        <div class="cap"><b>主題 · Paper + 圓圈</b> — 暖紙感 × 能量環</div>
+      </div>
+    </div>
+
+    <p class="section-title" id="sketch" style="margin-top:48px">手繪素描 · Sketch comic</p>
+    <p style="margin:-6px 0 16px;color:var(--muted);font-size:14px;line-height:1.5;max-width:64ch">
+      黑白墨線、漫畫分鏡感——不是 UI 截圖，是 NexStatus 的手繪說明頁。
+    </p>
+    <div class="gallery-2">
+      <div class="sketch-frame">
+        <img src="assets/sketch-menubar.jpg" alt="Hand-drawn sketch of NexStatus menubar and circular gauges" />
+      </div>
+      <div class="sketch-frame">
+        <img src="assets/sketch-stylesheet.jpg" alt="Hand-drawn sketch sheet of six NexStatus style pages" />
+      </div>
+    </div>
+    <div class="shot" style="margin-top:16px;margin-bottom:48px;background:#f6f4ef;border-color:rgba(0,0,0,0.08)">
+      <img src="assets/sketch-desk.jpg" alt="Hand-drawn comic of developer with NexStatus thought bubble" />
+      <div class="cap" style="color:#5c5348"><b style="color:#1c1917">工作台分鏡</b> — 額度天氣與圓環在腦袋裡轉</div>
     </div>
 
     <p class="section-title">Creative edition <span style="font-weight:500;color:var(--soft);text-transform:none;letter-spacing:0">— ship-with-NexStatus</span></p>

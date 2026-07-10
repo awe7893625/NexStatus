@@ -20,13 +20,21 @@ C70% G49% K10% M8%
 ```
 
 <p align="center">
-  <img src="docs/assets/loaders-circle.png" alt="NexStatus circular percentage loaders" width="720" />
+  <img src="docs/assets/energy-rings.png" alt="NexStatus circular energy gauges" width="760" />
 </p>
 
 <p align="center">
-  <img src="docs/assets/panel-preview-sm.png" alt="NexStatus bar panel" width="280" />
+  <img src="docs/assets/style-gallery.png" alt="NexStatus style pages gallery" width="760" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/panel-preview-sm.png" alt="NexStatus bar panel" width="240" />
   &nbsp;
-  <img src="docs/assets/panel-circle-sm.png" alt="NexStatus circle panel" width="280" />
+  <img src="docs/assets/panel-circle-sm.png" alt="NexStatus circle panel" width="240" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/sketch-menubar.jpg" alt="Hand-drawn sketch NexStatus" width="480" />
 </p>
 
 <p align="center">
