@@ -641,20 +641,29 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
     def fmt(label: str, v: Any) -> str:
         return f"{label}{v}" if v is not None else f"{label}—"
 
-    # Compact Apple-like chips; Hammerspoon adds middots / spacing for display
-    title = " ".join(
+    # MenuBar: C=Claude G=Codex K=Grok  →  "C70% G49% K8%"  (+ M%% when swap/RAM hot)
+    def chip(letter: str, v: Any) -> str:
+        return f"{letter}{v}%" if v is not None else f"{letter}—%"
+
+    title_full = " ".join(
         [
-            fmt("Cl", cl),
-            fmt("Cx", cx),
-            fmt("Go", go_pct),
-            fmt("G", gk),
-            fmt("M", mem),
+            chip("C", cl),
+            chip("G", cx),
+            chip("Go", go_pct),
+            chip("K", gk),
+            chip("M", mem),
         ]
     )
+    title_parts = [chip("C", cl), chip("G", cx), chip("K", gk)]
+    swap_mb = float(host.get("swap_mb") or 0)
+    if swap_mb >= 64 or (mem is not None and mem >= 80):
+        title_parts.append(chip("M", mem))
+    title = " ".join(title_parts).upper()
 
     return {
         "ok": True,
         "title": title,
+        "title_full": title_full,
         "polled_at": datetime.now(timezone.utc).isoformat(),
         "polled_at_ts": _now(),
         "host": host,

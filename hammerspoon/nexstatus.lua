@@ -11,10 +11,108 @@ local panel = nil
 local HOME = os.getenv("HOME") or ""
 local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Developer/NexStatus")
 local SNAP = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. "/status.json"
+local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatus")) .. "/prefs.json"
 local PY = ROOT .. "/nexstatus/collector.py"
 local PYTHON = "/usr/bin/python3"
-local PANEL_W = 348
-local PANEL_H = 680
+local PANEL_W = 360
+local PANEL_H = 720
+
+-- Chart style: bar | circle
+-- Theme: glass | paper | mono | nord
+local CHART_ORDER = { "bar", "circle" }
+local THEME_ORDER = { "glass", "paper", "mono", "nord" }
+local THEMES = {
+  glass = {
+    name = "Glass",
+    color_scheme = "dark",
+    bg = "rgba(28, 28, 30, 0.78)",
+    card = "rgba(44, 44, 46, 0.72)",
+    border = "rgba(255,255,255,0.10)",
+    text = "#F5F5F7",
+    muted = "rgba(235,235,245,0.62)",
+    sub = "rgba(235,235,245,0.48)",
+    track = "rgba(120,120,128,0.28)",
+    blue = "#0A84FF",
+    glow1 = "rgba(10,132,255,0.14)",
+    glow2 = "rgba(191,90,242,0.10)",
+  },
+  paper = {
+    name = "Paper",
+    color_scheme = "light",
+    bg = "rgba(250, 247, 240, 0.94)",
+    card = "rgba(255, 255, 255, 0.88)",
+    border = "rgba(40,30,20,0.10)",
+    text = "#1C1917",
+    muted = "rgba(60,50,40,0.62)",
+    sub = "rgba(60,50,40,0.48)",
+    track = "rgba(80,70,60,0.14)",
+    blue = "#C2410C",
+    glow1 = "rgba(251,191,36,0.18)",
+    glow2 = "rgba(194,65,12,0.08)",
+  },
+  mono = {
+    name = "Mono",
+    color_scheme = "dark",
+    bg = "rgba(12, 12, 12, 0.90)",
+    card = "rgba(28, 28, 28, 0.88)",
+    border = "rgba(255,255,255,0.12)",
+    text = "#FAFAFA",
+    muted = "rgba(255,255,255,0.55)",
+    sub = "rgba(255,255,255,0.40)",
+    track = "rgba(255,255,255,0.12)",
+    blue = "#FAFAFA",
+    glow1 = "rgba(255,255,255,0.06)",
+    glow2 = "rgba(255,255,255,0.03)",
+  },
+  nord = {
+    name = "Nord",
+    color_scheme = "dark",
+    bg = "rgba(46, 52, 64, 0.90)",
+    card = "rgba(59, 66, 82, 0.88)",
+    border = "rgba(136,192,208,0.18)",
+    text = "#ECEFF4",
+    muted = "rgba(216,222,233,0.70)",
+    sub = "rgba(216,222,233,0.50)",
+    track = "rgba(76,86,106,0.80)",
+    blue = "#88C0D0",
+    glow1 = "rgba(136,192,208,0.14)",
+    glow2 = "rgba(129,161,193,0.10)",
+  },
+}
+
+local prefs = { chart = "bar", theme = "glass" }
+
+local function loadPrefs()
+  local f = io.open(PREFS_PATH, "r")
+  if not f then return end
+  local raw = f:read("*a")
+  f:close()
+  local ok, data = pcall(hs.json.decode, raw or "")
+  if ok and type(data) == "table" then
+    if data.chart == "bar" or data.chart == "circle" then prefs.chart = data.chart end
+    if THEMES[data.theme] then prefs.theme = data.theme end
+  end
+end
+
+local function savePrefs()
+  local dir = PREFS_PATH:match("(.+)/[^/]+$")
+  if dir then hs.fs.mkdir(dir) end
+  local f = io.open(PREFS_PATH, "w")
+  if not f then return end
+  f:write(hs.json.encode({ chart = prefs.chart, theme = prefs.theme }))
+  f:close()
+end
+
+local function cycleList(list, cur)
+  for i, v in ipairs(list) do
+    if v == cur then
+      return list[(i % #list) + 1]
+    end
+  end
+  return list[1]
+end
+
+loadPrefs()
 
 local function shell(cmd)
   local output, status = hs.execute(cmd, true)
@@ -82,23 +180,55 @@ local function esc(s)
     :gsub('"', "&quot;")
 end
 
+local function meterBar(label, p, col)
+  local w = p or 0
+  local val = p and (tostring(p) .. "%") or "—"
+  return string.format([[
+    <div class="meter">
+      <div class="meter-top">
+        <span class="meter-label">%s</span>
+        <span class="meter-val" style="color:%s">%s</span>
+      </div>
+      <div class="track"><div class="fill" style="width:%d%%;background:%s"></div></div>
+    </div>
+  ]], esc(label), col, val, w, col)
+end
+
+local function meterCircle(label, p, col)
+  local w = p or 0
+  local val = p and (tostring(p) .. "%") or "—"
+  -- r≈15.9155 → circumference 100 for easy stroke-dasharray percent
+  return string.format([[
+    <div class="ring-item">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 36 36" class="ring">
+          <path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+          <path class="ring-fg" stroke="%s" stroke-dasharray="%d, 100"
+            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+        </svg>
+        <div class="ring-num" style="color:%s">%s</div>
+      </div>
+      <div class="ring-label">%s</div>
+    </div>
+  ]], col, w, col, val, esc(label))
+end
+
 local function rowHTML(opts)
   -- opts: name, badge, main, sub, bars = {{label, pct}, ...}
-  local bars = ""
-  for _, b in ipairs(opts.bars or {}) do
-    local p = pct(b.pct)
-    local w = p or 0
-    local col = barColor(p)
-    local val = p and (tostring(p) .. "%") or "—"
-    bars = bars .. string.format([[
-      <div class="meter">
-        <div class="meter-top">
-          <span class="meter-label">%s</span>
-          <span class="meter-val" style="color:%s">%s</span>
-        </div>
-        <div class="track"><div class="fill" style="width:%d%%;background:%s"></div></div>
-      </div>
-    ]], esc(b.label), col, val, w, col)
+  local chart = prefs.chart or "bar"
+  local meters = ""
+  if chart == "circle" then
+    meters = '<div class="rings">'
+    for _, b in ipairs(opts.bars or {}) do
+      local p = pct(b.pct)
+      meters = meters .. meterCircle(b.label, p, barColor(p))
+    end
+    meters = meters .. "</div>"
+  else
+    for _, b in ipairs(opts.bars or {}) do
+      local p = pct(b.pct)
+      meters = meters .. meterBar(b.label, p, barColor(p))
+    end
   end
 
   return string.format([[
@@ -120,7 +250,7 @@ local function rowHTML(opts)
     opts.badge and ('<span class="badge">' .. esc(opts.badge) .. "</span>") or "",
     esc(opts.main or ""),
     esc(opts.sub or ""),
-    bars
+    meters
   )
 end
 
@@ -257,6 +387,10 @@ local function buildHTML(s)
     updated = "更新 " .. tostring(s.polled_at):sub(12, 19) .. " UTC"
   end
 
+  local th = THEMES[prefs.theme] or THEMES.glass
+  local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
+  local themeLabel = th.name or prefs.theme
+
   return string.format([[<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -264,16 +398,17 @@ local function buildHTML(s)
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <style>
   :root {
-    color-scheme: dark;
-    --bg: rgba(28, 28, 30, 0.78);
-    --card: rgba(44, 44, 46, 0.72);
-    --card-border: rgba(255,255,255,0.08);
-    --label: rgba(235,235,245,0.6);
-    --text: #F5F5F7;
-    --sub: rgba(235,235,245,0.48);
-    --track: rgba(120,120,128,0.28);
-    --sep: rgba(84,84,88,0.55);
-    --blue: #0A84FF;
+    color-scheme: %s;
+    --bg: %s;
+    --card: %s;
+    --card-border: %s;
+    --label: %s;
+    --text: %s;
+    --sub: %s;
+    --track: %s;
+    --blue: %s;
+    --glow1: %s;
+    --glow2: %s;
   }
   * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
   html, body {
@@ -289,11 +424,11 @@ local function buildHTML(s)
     height: 100%%;
     padding: 11px 11px 10px;
     background:
-      radial-gradient(120%% 80%% at 0%% 0%%, rgba(10,132,255,0.14), transparent 52%%),
-      radial-gradient(100%% 70%% at 100%% 100%%, rgba(191,90,242,0.10), transparent 48%%),
+      radial-gradient(120%% 80%% at 0%% 0%%, var(--glow1), transparent 52%%),
+      radial-gradient(100%% 70%% at 100%% 100%%, var(--glow2), transparent 48%%),
       var(--bg);
     border-radius: 16px;
-    border: 0.5px solid rgba(255,255,255,0.16);
+    border: 0.5px solid var(--card-border);
     box-shadow:
       0 22px 56px rgba(0,0,0,0.48),
       0 0 0 0.5px rgba(0,0,0,0.28) inset;
@@ -324,6 +459,58 @@ local function buildHTML(s)
     font-size: 11px;
     color: var(--sub);
     font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .toolbar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 0 2px 2px;
+  }
+  .pill {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    background: rgba(120,120,128,0.22);
+    border: 0.5px solid var(--card-border);
+    border-radius: 999px;
+    padding: 4px 9px;
+    text-decoration: none;
+  }
+  .pill:active { opacity: 0.75; }
+  .rings {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .ring-item { width: 72px; text-align: center; }
+  .ring-wrap { position: relative; width: 56px; height: 56px; margin: 0 auto; }
+  .ring { width: 56px; height: 56px; transform: rotate(0deg); }
+  .ring-bg {
+    fill: none;
+    stroke: var(--track);
+    stroke-width: 3.2;
+  }
+  .ring-fg {
+    fill: none;
+    stroke-width: 3.2;
+    stroke-linecap: round;
+    transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .ring-num {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ring-label {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--label);
+    font-weight: 500;
+    line-height: 1.2;
   }
   .list {
     display: flex;
@@ -418,13 +605,13 @@ local function buildHTML(s)
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-    padding-top: 2px;
+    padding-top: 4px;
   }
   .btn {
     appearance: none;
     border: 0;
     border-radius: 10px;
-    height: 34px;
+    height: 36px;
     font: inherit;
     font-size: 12px;
     font-weight: 600;
@@ -437,38 +624,60 @@ local function buildHTML(s)
     color: var(--text);
     background: rgba(120,120,128,0.28);
     transition: background 0.15s ease, transform 0.1s ease;
+    -webkit-user-select: none;
+    user-select: none;
   }
   .btn:active { transform: scale(0.98); }
   .btn.primary {
     background: var(--blue);
     color: white;
   }
-  .btn.ghost {
-    background: transparent;
-    color: var(--label);
+  .hint {
     grid-column: 1 / -1;
-    height: 28px;
-    font-weight: 500;
+    text-align: center;
+    font-size: 10px;
+    color: var(--sub);
+    margin-top: 2px;
   }
 </style>
 </head>
 <body>
   <div class="shell">
     <div class="top">
-      <div class="title">NexStatus<span>usage</span></div>
-      <div class="stamp">%s</div>
+      <div class="title">NexStatus<span>控制面</span></div>
+      <div class="stamp">%s<br/><span style="opacity:.8">%s · %s</span></div>
+    </div>
+    <div class="toolbar">
+      <a class="pill" href="nexstatus://cycle-chart">圖表：%s</a>
+      <a class="pill" href="nexstatus://cycle-theme">主題：%s</a>
     </div>
     <div class="list">
       %s
     </div>
     <div class="actions">
       <a class="btn primary" href="nexstatus://refresh">重新整理</a>
-      <a class="btn" href="nexstatus://stats">Stats</a>
-      <a class="btn ghost" href="nexstatus://close">關閉</a>
+      <a class="btn" href="nexstatus://close">關閉面板</a>
+      <div class="hint">點「圖表／主題」可切換風格 · MenuBar 標題可再開</div>
     </div>
   </div>
+  <script>
+    document.addEventListener('click', function (e) {
+      var t = e.target;
+      while (t && t.tagName !== 'A') t = t.parentElement;
+      if (!t) return;
+      var href = t.getAttribute('href') || '';
+      if (href.indexOf('nexstatus:') !== 0) return;
+      e.preventDefault();
+      window.location.href = href;
+    }, true);
+  </script>
 </body>
-</html>]], esc(updated), cards)
+</html>]],
+    th.color_scheme, th.bg, th.card, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
+    esc(updated), esc(chartLabel), esc(themeLabel),
+    esc(chartLabel), esc(themeLabel),
+    cards
+  )
 end
 
 local function positionPanel()
@@ -494,7 +703,8 @@ local function showPanel()
 
   if not panel then
     panel = hs.webview.new(hs.geometry.rect(0, 0, PANEL_W, PANEL_H), {
-      javaScriptEnabled = false,
+      -- JS only for reliable button click → custom scheme (no remote content)
+      javaScriptEnabled = true,
       javaScriptCanOpenWindowsAutomatically = false,
       developerExtrasEnabled = false,
     })
@@ -509,45 +719,51 @@ local function showPanel()
     panel:bringToFront(true)
 
     local function handleAction(url)
-      if type(url) ~= "string" or url:sub(1, 12) ~= "nexstatus://" then
-        return false
-      end
-      local action = url:sub(13):gsub("[?#].*$", "")
+      if type(url) ~= "string" then return false end
+      -- accept nexstatus://action or nexstatus:/action
+      local action = url:match("nexstatus:/*([%w_%-]+)")
+      if not action then return false end
+      action = action:gsub("[?#].*$", "")
+      hs.printf("[nexstatus] action=%s url=%s", action, url)
       if action == "refresh" then
         refreshSnapshot(true)
         if panel then panel:html(buildHTML(readSnapshot())) end
         M.refreshTitleOnly()
-      elseif action == "stats" then
-        hs.execute("open -a Stats", true)
-        hidePanel()
+      elseif action == "cycle-chart" then
+        prefs.chart = cycleList(CHART_ORDER, prefs.chart)
+        savePrefs()
+        if panel then panel:html(buildHTML(readSnapshot())) end
+      elseif action == "cycle-theme" then
+        prefs.theme = cycleList(THEME_ORDER, prefs.theme)
+        savePrefs()
+        if panel then panel:html(buildHTML(readSnapshot())) end
       elseif action == "close" then
         hidePanel()
       end
       return true
     end
 
-    -- Prefer policyCallback (blocks navigation to nexstatus://)
+    local function extractUrl(details)
+      if type(details) == "string" then return details end
+      if type(details) ~= "table" then return nil end
+      return details.URL
+        or details.url
+        or details.mainDocumentURL
+        or (type(details.request) == "table" and (details.request.URL or details.request.url))
+        or (type(details.navigationAction) == "table" and details.navigationAction.request and details.navigationAction.request.URL)
+    end
+
+    -- Intercept custom scheme before WebKit errors
     panel:policyCallback(function(action, _, details)
-      local url = nil
-      if type(details) == "table" then
-        url = details.URL or details.url or details.mainDocumentURL
-        if not url and type(details.request) == "table" then
-          url = details.request.URL or details.request.url
-        end
-      elseif type(details) == "string" then
-        url = details
-      end
+      local url = extractUrl(details)
       if url and handleAction(tostring(url)) then
-        return false
+        return false -- cancel navigation
       end
       return true
     end)
 
     panel:navigationCallback(function(action, _, _, req)
-      local url = req
-      if type(req) == "table" then
-        url = req.URL or req.url
-      end
+      local url = extractUrl(req) or req
       if url and handleAction(tostring(url)) then
         return false
       end
@@ -559,6 +775,10 @@ local function showPanel()
   positionPanel()
   panel:show()
   panel:bringToFront(true)
+  -- Ensure key window so clicks register on Tahoe
+  if panel.hswindow and panel:hswindow() then
+    panel:hswindow():focus()
+  end
 end
 
 local function togglePanel()
@@ -569,22 +789,56 @@ local function togglePanel()
   end
 end
 
+-- Public: open control panel (for debugging / scripts)
+function M.openPanel()
+  showPanel()
+end
+
 function M.refreshTitleOnly()
   if not item then return end
-  local s = readSnapshot()
-  local title
-  if s and s.title then
-    -- Title from python: "Cl7 Cx5 Go100 G8 M6" → "Cl7 · Cx5 · Go100 · G8 · M6"
-    local parts = {}
-    for token in tostring(s.title):gmatch("%S+") do
-      table.insert(parts, token)
+  local s = readSnapshot() or {}
+  local host = s.host or {}
+  local cl = s.claude or {}
+  local cx = s.codex or {}
+  local go = s.opencode_go or {}
+  local gk = s.grok or {}
+
+  -- Main bar: C=Claude · G=Code/Codex · K=Grok  →  e.g. C70% G49% K8%
+  local function chip(letter, ok, val)
+    if not ok or val == nil then
+      return letter .. "—%"
     end
-    title = table.concat(parts, " · ")
-  else
-    title = "Cl— · Cx— · Go— · G— · M—"
+    return string.format("%s%d%%", letter, tonumber(val) or 0)
   end
+
+  local parts = {
+    chip("C", cl.ok, cl.five_hour_pct),
+    chip("G", cx.ok, cx.five_hour_pct),
+    chip("K", gk.ok, gk.used_pct),
+  }
+
+  -- Optional memory chip when swap is active or RAM is tight
+  local mem = tonumber(host.mem_pct)
+  local swap = tonumber(host.swap_mb) or 0
+  local showMem = (swap >= 64) or (mem ~= nil and mem >= 80)
+  if showMem and mem ~= nil then
+    table.insert(parts, string.format("M%d%%", mem))
+  end
+
+  -- Force uppercase chips only (C70% G49% K10% M8%) — never lowercase
+  local title = table.concat(parts, " "):upper()
+  local tip = string.format(
+    "NexStatus\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下看完整面板",
+    pctText(cl.five_hour_pct),
+    pctText(cx.five_hour_pct),
+    pctText(gk.used_pct),
+    pctText(go.used_pct),
+    pctText(mem),
+    swap
+  )
+
   item:setTitle(" " .. title .. " ")
-  item:setTooltip("Claude · Codex · OpenCode Go · Grok · Memory\n點一下開啟總覽")
+  item:setTooltip(tip)
 end
 
 function M.refresh()

@@ -9,20 +9,32 @@
 🌐 **Landing page:** https://awe7893625.github.io/NexStatus/  
 📦 **Source:** https://github.com/awe7893625/NexStatus
 
-See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with progress bars.
+See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with **bar or circle** progress, and **switchable color themes**.
 
 ```text
-Cl7 · Cx5 · Go100 · G8 · M6
- │     │     │      │    └─ Memory %
- │     │     │      └────── Grok monthly credits %
- │     │     └───────────── OpenCode Go plan %
- │     └─────────────────── Codex 5h quota %
- └───────────────────────── Claude 5h quota %
+C70% G49% K10% M8%
+ │    │    │    └─ Memory (when swap / high RAM)
+ │    │    └────── K = Grok monthly credits
+ │    └─────────── G = Codex (Code) 5h quota
+ └──────────────── C = Claude 5h quota
 ```
+
+<p align="center">
+  <img src="docs/assets/panel-preview-sm.png" alt="NexStatus glass control panel" width="320" />
+</p>
 
 <p align="center">
   <em>macOS MenuBar · Hammerspoon · Python 3 · MIT</em>
 </p>
+
+### Styles
+
+| Control (in panel) | Options |
+|--------------------|---------|
+| **圖表** | `長條` progress bars · `圓圈` ring gauges |
+| **主題** | `Glass` · `Paper` · `Mono` · `Nord` |
+
+Prefs are stored locally at `~/.config/nexstatus/prefs.json` (not committed).
 
 ---
 
