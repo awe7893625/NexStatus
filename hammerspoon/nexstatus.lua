@@ -14,8 +14,8 @@ local SNAP = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. 
 local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatus")) .. "/prefs.json"
 local PY = ROOT .. "/nexstatus/collector.py"
 local PYTHON = "/usr/bin/python3"
-local PANEL_W = 360
-local PANEL_H = 780
+local PANEL_W = 380
+local PANEL_H = 820
 
 -- Chart: bar | circle
 -- Theme: glass | paper | mono | nord | aurora (creative)
@@ -673,7 +673,7 @@ local function buildHTML(s)
   }
   .shell {
     height: 100%%;
-    padding: 11px 11px 10px;
+    padding: 10px 10px 8px;
     background:
       radial-gradient(120%% 80%% at 0%% 0%%, var(--glow1), transparent 52%%),
       radial-gradient(100%% 70%% at 100%% 100%%, var(--glow2), transparent 48%%),
@@ -685,6 +685,27 @@ local function buildHTML(s)
       0 0 0 0.5px rgba(0,0,0,0.28) inset;
     backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+  }
+  .data {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 2px 2px 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .customize {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--card-border);
+    padding: 10px 4px 4px;
+    margin-top: 2px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.12), transparent 28px);
     display: flex;
     flex-direction: column;
     gap: 7px;
@@ -873,9 +894,6 @@ local function buildHTML(s)
     display: flex;
     flex-direction: column;
     gap: 7px;
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
   }
   .card {
     background: var(--card);
@@ -1001,54 +1019,62 @@ local function buildHTML(s)
 <body>
   <div class="shell%s">
     <div class="top">
-      <div class="title">NexStatus<span>控制面</span></div>
+      <div class="title">NexStatus<span>儀表板</span></div>
       <div class="stamp">%s<br/><span style="opacity:.8">%s · %s · 透%d%%</span></div>
     </div>
-    <div class="customize-head">客製化 · 點下面切換（MenuBar 選單也可）</div>
-    <div class="toolbar">
-      <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
-      <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
-      <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
-      <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
-    </div>
-    <div class="lab">
-      <div class="lab-row">
-        <span>透明度</span>
-        <a class="step" href="#" data-action="opacity-down">−</a>
-        <span class="lab-val">%d%%</span>
-        <a class="step" href="#" data-action="opacity-up">+</a>
-      </div>
-      <div class="lab-row">
-        <span>模糊</span>
-        <a class="step" href="#" data-action="blur-down">−</a>
-        <span class="lab-val">%d</span>
-        <a class="step" href="#" data-action="blur-up">+</a>
-      </div>
-      <div class="lab-row">
-        <span>飽和</span>
-        <a class="step" href="#" data-action="sat-down">−</a>
-        <span class="lab-val">%d</span>
-        <a class="step" href="#" data-action="sat-up">+</a>
-      </div>
-    </div>
-    %s
-    %s
-    <div class="list">
+
+    <div class="data">
       %s
+      %s
+      <div class="list">
+        %s
+      </div>
     </div>
-    <div class="actions">
-      <a class="btn primary" href="#" data-action="refresh">重新整理</a>
-      <a class="btn" href="#" data-action="close">關閉面板</a>
-      <div class="hint">圖表 · 主題 · 玻璃 · 透明度 / 模糊 / 飽和 · 壓力雷達</div>
+
+    <div class="customize">
+      <div class="customize-head">客製化 · 直接在此面板切換（無需另開視窗）</div>
+      <div class="toolbar">
+        <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
+        <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
+        <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
+        <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
+      </div>
+      <div class="lab">
+        <div class="lab-row">
+          <span>透明度</span>
+          <a class="step" href="#" data-action="opacity-down">−</a>
+          <span class="lab-val">%d%%</span>
+          <a class="step" href="#" data-action="opacity-up">+</a>
+        </div>
+        <div class="lab-row">
+          <span>模糊</span>
+          <a class="step" href="#" data-action="blur-down">−</a>
+          <span class="lab-val">%d</span>
+          <a class="step" href="#" data-action="blur-up">+</a>
+        </div>
+        <div class="lab-row">
+          <span>飽和</span>
+          <a class="step" href="#" data-action="sat-down">−</a>
+          <span class="lab-val">%d</span>
+          <a class="step" href="#" data-action="sat-up">+</a>
+        </div>
+      </div>
+      <div class="actions">
+        <a class="btn primary" href="#" data-action="refresh">重新整理</a>
+        <a class="btn" href="#" data-action="close">關閉</a>
+        <div class="hint">設定會即時套用到上方資料區 · 記住在本機 prefs</div>
+      </div>
     </div>
   </div>
   <script>
     function sendAction(action) {
       try {
-        window.webkit.messageHandlers.nexBridge.postMessage({ action: action });
-      } catch (e) {
-        document.title = "NEX|" + action;
-      }
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nexBridge) {
+          window.webkit.messageHandlers.nexBridge.postMessage({ action: action });
+          return;
+        }
+      } catch (e) {}
+      document.title = "NEX|" + action + "|" + Date.now();
     }
     document.addEventListener("click", function (e) {
       var t = e.target;
@@ -1057,6 +1083,7 @@ local function buildHTML(s)
       }
       if (!t) return;
       e.preventDefault();
+      e.stopPropagation();
       sendAction(t.getAttribute("data-action"));
     }, true);
   </script>
@@ -1067,11 +1094,13 @@ local function buildHTML(s)
     auroraCSS,
     (prefs.theme == "aurora") and " aurora" or "",
     esc(updated), esc(chartLabel), esc(themeLabel), math.floor(op * 100 + 0.5),
-    esc(chartLabel), esc(themeLabel), esc(gLabel), prefs.radar and "開" or "關",
-    math.floor(op * 100 + 0.5), blur, sat,
+    -- data zone
     radar,
     hero,
-    cards
+    cards,
+    -- customize zone
+    esc(chartLabel), esc(themeLabel), esc(gLabel), prefs.radar and "開" or "關",
+    math.floor(op * 100 + 0.5), blur, sat
   )
 end
 
@@ -1280,7 +1309,7 @@ function M.refreshTitleOnly()
     title = "!" .. title
   end
   local tip = string.format(
-    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下打開選單：可切圖表／主題／玻璃／透明度，或開控制面板",
+    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下開啟儀表板：上方資料、下方直接客製化",
     pr.score,
     pr.weather,
     pctText(cl.five_hour_pct),
@@ -1305,153 +1334,25 @@ function M.refresh()
   end
 end
 
-local function doAction(action)
-  handleAction(action)
-  -- keep title + open panel in sync after menu picks
-  M.refreshTitleOnly()
-  if panel and panel:hswindow() and panel:hswindow():isVisible() then
-    panel:html(buildHTML(readSnapshot()))
-  end
-end
-
-local function buildMenu()
-  local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
-  local th = THEMES[prefs.theme] or THEMES.glass
-  local gLabel = glassLabel()
-  local opPct = math.floor(clamp(prefs.opacity or 0.72, 0.35, 0.98) * 100 + 0.5)
-
-  local themeItems = {}
-  for _, key in ipairs(THEME_ORDER) do
-    local t = THEMES[key]
-    table.insert(themeItems, {
-      title = (t and t.name or key),
-      checked = (prefs.theme == key),
-      fn = function()
-        prefs.theme = key
-        savePrefs()
-        doAction("refresh") -- redraw title/panel without remote force
-        if panel and panel:hswindow() and panel:hswindow():isVisible() then
-          panel:html(buildHTML(readSnapshot()))
-        end
-        M.refreshTitleOnly()
-        hs.printf("[nexstatus] menu theme=%s", key)
-      end,
-    })
-  end
-
-  local chartItems = {
-    {
-      title = "長條 bars",
-      checked = prefs.chart == "bar",
-      fn = function()
-        prefs.chart = "bar"; savePrefs()
-        M.refreshTitleOnly()
-        if panel and panel:hswindow() and panel:hswindow():isVisible() then
-          panel:html(buildHTML(readSnapshot()))
-        end
-      end,
-    },
-    {
-      title = "圓圈 energy rings",
-      checked = prefs.chart == "circle",
-      fn = function()
-        prefs.chart = "circle"; savePrefs()
-        M.refreshTitleOnly()
-        if panel and panel:hswindow() and panel:hswindow():isVisible() then
-          panel:html(buildHTML(readSnapshot()))
-        end
-      end,
-    },
-  }
-
-  local glassItems = {}
-  for _, key in ipairs(GLASS_PRESET_ORDER) do
-    local p = GLASS_PRESETS[key]
-    table.insert(glassItems, {
-      title = string.format("%s  (透%d%% 模糊%d)", p.name, math.floor(p.opacity * 100 + 0.5), p.blur),
-      checked = prefs.glass_preset == key,
-      fn = function()
-        applyGlassPreset(key)
-        savePrefs()
-        M.refreshTitleOnly()
-        if panel and panel:hswindow() and panel:hswindow():isVisible() then
-          panel:html(buildHTML(readSnapshot()))
-        end
-      end,
-    })
-  end
-
-  return {
-    {
-      title = "開啟控制面板…",
-      fn = function() showPanel() end,
-    },
-    { title = "-" },
-    {
-      title = "圖表：" .. chartLabel,
-      menu = chartItems,
-    },
-    {
-      title = "主題：" .. (th.name or prefs.theme),
-      menu = themeItems,
-    },
-    {
-      title = "玻璃：" .. gLabel,
-      menu = glassItems,
-    },
-    {
-      title = string.format("透明度：%d%%", opPct),
-      menu = {
-        { title = "更透 (−5%)", fn = function() doAction("opacity-down") end },
-        { title = string.format("目前 %d%%", opPct), disabled = true },
-        { title = "更實 (+5%)", fn = function() doAction("opacity-up") end },
-      },
-    },
-    {
-      title = string.format("模糊：%d", prefs.blur or 48),
-      menu = {
-        { title = "更弱 (−6)", fn = function() doAction("blur-down") end },
-        { title = string.format("目前 %d px", prefs.blur or 48), disabled = true },
-        { title = "更強 (+6)", fn = function() doAction("blur-up") end },
-      },
-    },
-    {
-      title = string.format("飽和：%d", prefs.saturate or 190),
-      menu = {
-        { title = "更低 (−15)", fn = function() doAction("sat-down") end },
-        { title = string.format("目前 %d", prefs.saturate or 190), disabled = true },
-        { title = "更高 (+15)", fn = function() doAction("sat-up") end },
-      },
-    },
-    {
-      title = "壓力雷達",
-      checked = prefs.radar ~= false,
-      fn = function() doAction("toggle-radar") end,
-    },
-    { title = "-" },
-    {
-      title = "重新整理數據",
-      fn = function() doAction("refresh") end,
-    },
-    {
-      title = "關閉面板",
-      fn = function() hidePanel() end,
-    },
-  }
-end
-
 function M.start()
   if item then return end
+  -- Always rebuild panel so bridge matches this code version
+  if panel then
+    pcall(function() panel:delete() end)
+    panel = nil
+  end
+
   item = hs.menubar.new(true)
   if not item then
     hs.printf("[nexstatus] failed to create menubar")
     return
   end
 
-  -- Native MenuBar dropdown = reliable customization (does not depend on webview buttons)
-  item:setMenu(buildMenu)
-  -- Also allow click-to-open panel as primary action via first menu item;
-  -- users discover 圖表/主題/玻璃 immediately in the same menu.
+  -- Click MenuBar chips → one tall dashboard (data + customize on same panel)
+  item:setClickCallback(function()
+    togglePanel()
+  end)
+  -- No setMenu: dropdown would steal the click. All settings live in the panel footer.
 
   M.refresh()
   timer = hs.timer.doEvery(15, function()
@@ -1472,7 +1373,7 @@ function M.start()
   end)
   M._tap:start()
 
-  hs.printf("[nexstatus] NexStatus MenuBar started with native customize menu (root=%s)", ROOT)
+  hs.printf("[nexstatus] NexStatus MenuBar: click opens unified dashboard (root=%s)", ROOT)
 end
 
 function M.stop()
