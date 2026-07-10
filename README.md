@@ -54,9 +54,13 @@ C70% G49% K10% M8%
 | **雷達** Pressure Radar | On/off — overall burn score + ☀️⛅🌧️⛈️ quota weather |
 | **MenuBar alert** | `!` when pressure ≥ 75 · `⚡` when ≥ 90 |
 
-Click the MenuBar title — the panel **is** the settings surface.  
+**How to customize (MenuBar):**
+1. Click the MenuBar chips (`C70% G49% K…`)
+2. A **native dropdown menu** appears: 圖表 / 主題 / 玻璃 / 透明度 / 模糊 / 飽和 / 壓力雷達
+3. Or choose **開啟控制面板…** for the glass panel with the same knobs
+
 Prefs: `~/.config/nexstatus/prefs.json` (local only, never committed).  
-Landing page lists every control + a live Glass Lab demo: https://awe7893625.github.io/NexStatus/#customize
+Landing page: https://awe7893625.github.io/NexStatus/#customize
 
 ---
 

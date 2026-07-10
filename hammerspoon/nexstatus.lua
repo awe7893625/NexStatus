@@ -719,15 +719,22 @@ local function buildHTML(s)
     flex-wrap: wrap;
     padding: 0 2px 2px;
   }
+  .customize-head {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--label);
+    padding: 2px 4px 0;
+  }
   .pill {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 700;
     letter-spacing: -0.01em;
     color: var(--text);
-    background: rgba(120,120,128,0.22);
-    border: 0.5px solid var(--card-border);
+    background: rgba(10,132,255,0.22);
+    border: 1px solid rgba(10,132,255,0.35);
     border-radius: 999px;
-    padding: 4px 9px;
+    padding: 6px 11px;
     text-decoration: none;
   }
   .pill:active { opacity: 0.75; }
@@ -743,12 +750,12 @@ local function buildHTML(s)
     justify-content: space-between;
     gap: 4px;
     background: var(--card);
-    border: 0.5px solid var(--card-border);
+    border: 1px solid var(--card-border);
     border-radius: 10px;
-    padding: 5px 7px;
-    font-size: 10px;
+    padding: 7px 8px;
+    font-size: 11px;
     color: var(--label);
-    font-weight: 600;
+    font-weight: 700;
   }
   .lab-row .lab-val {
     color: var(--text);
@@ -997,6 +1004,7 @@ local function buildHTML(s)
       <div class="title">NexStatus<span>控制面</span></div>
       <div class="stamp">%s<br/><span style="opacity:.8">%s · %s · 透%d%%</span></div>
     </div>
+    <div class="customize-head">客製化 · 點下面切換（MenuBar 選單也可）</div>
     <div class="toolbar">
       <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
       <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
@@ -1157,45 +1165,58 @@ function M.fire(action)
   handleAction(action)
 end
 
+local function ensurePanel()
+  if panel then return panel end
+
+  -- Bridge: JS → Lua (primary)
+  local uc = hs.webview.usercontent.new("nexBridge")
+  uc:setCallback(function(msg)
+    local body = msg and msg.body
+    local action = nil
+    if type(body) == "string" then
+      action = body
+    elseif type(body) == "table" then
+      action = body.action or body.cmd or body[1]
+    end
+    if type(action) ~= "string" then return end
+    action = action:gsub("^/*", ""):gsub("[?#].*$", "")
+    hs.printf("[nexstatus] bridge action=%s", action)
+    handleAction(action)
+  end)
+
+  panel = hs.webview.new(hs.geometry.rect(0, 0, PANEL_W, PANEL_H), {
+    javaScriptEnabled = true,
+    javaScriptCanOpenWindowsAutomatically = false,
+    developerExtrasEnabled = false,
+  }, uc)
+  panel:windowStyle({ "borderless", "utility", "nonactivating" })
+  panel:level(hs.drawing.windowLevels.floating)
+  panel:allowGestures(false)
+  panel:allowNewWindows(false)
+  panel:shadow(true)
+  panel:closeOnEscape(true)
+  panel:transparent(true)
+  panel:deleteOnClose(false)
+  panel:bringToFront(true)
+
+  -- Fallback: if messageHandlers fails, JS sets document.title = "NEX|action"
+  if panel.frameTitleChangedCallback then
+    panel:frameTitleChangedCallback(function(title)
+      if type(title) == "string" and title:sub(1, 4) == "NEX|" then
+        local action = title:sub(5)
+        hs.printf("[nexstatus] title-fallback action=%s", action)
+        handleAction(action)
+      end
+    end)
+  end
+  return panel
+end
+
 local function showPanel()
   refreshSnapshot(false)
   local s = readSnapshot()
   local html = buildHTML(s)
-
-  if not panel then
-    -- Reliable button bridge: window.webkit.messageHandlers.nexBridge.postMessage(...)
-    local uc = hs.webview.usercontent.new("nexBridge")
-    uc:setCallback(function(msg)
-      local body = msg and msg.body
-      local action = nil
-      if type(body) == "string" then
-        action = body
-      elseif type(body) == "table" then
-        action = body.action or body.cmd or body[1]
-      end
-      if type(action) ~= "string" then return end
-      action = action:gsub("^/*", ""):gsub("[?#].*$", "")
-      hs.printf("[nexstatus] bridge action=%s", action)
-
-      handleAction(action)
-    end)
-
-    panel = hs.webview.new(hs.geometry.rect(0, 0, PANEL_W, PANEL_H), {
-      javaScriptEnabled = true,
-      javaScriptCanOpenWindowsAutomatically = false,
-      developerExtrasEnabled = false,
-    }, uc)
-    panel:windowStyle({ "borderless", "utility", "nonactivating" })
-    panel:level(hs.drawing.windowLevels.floating)
-    panel:allowGestures(false)
-    panel:allowNewWindows(false)
-    panel:shadow(true)
-    panel:closeOnEscape(true)
-    panel:transparent(true)
-    panel:deleteOnClose(false)
-    panel:bringToFront(true)
-  end
-
+  ensurePanel()
   panel:html(html)
   positionPanel()
   panel:show()
@@ -1259,7 +1280,7 @@ function M.refreshTitleOnly()
     title = "!" .. title
   end
   local tip = string.format(
-    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下看完整面板",
+    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下打開選單：可切圖表／主題／玻璃／透明度，或開控制面板",
     pr.score,
     pr.weather,
     pctText(cl.five_hour_pct),
@@ -1284,6 +1305,141 @@ function M.refresh()
   end
 end
 
+local function doAction(action)
+  handleAction(action)
+  -- keep title + open panel in sync after menu picks
+  M.refreshTitleOnly()
+  if panel and panel:hswindow() and panel:hswindow():isVisible() then
+    panel:html(buildHTML(readSnapshot()))
+  end
+end
+
+local function buildMenu()
+  local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
+  local th = THEMES[prefs.theme] or THEMES.glass
+  local gLabel = glassLabel()
+  local opPct = math.floor(clamp(prefs.opacity or 0.72, 0.35, 0.98) * 100 + 0.5)
+
+  local themeItems = {}
+  for _, key in ipairs(THEME_ORDER) do
+    local t = THEMES[key]
+    table.insert(themeItems, {
+      title = (t and t.name or key),
+      checked = (prefs.theme == key),
+      fn = function()
+        prefs.theme = key
+        savePrefs()
+        doAction("refresh") -- redraw title/panel without remote force
+        if panel and panel:hswindow() and panel:hswindow():isVisible() then
+          panel:html(buildHTML(readSnapshot()))
+        end
+        M.refreshTitleOnly()
+        hs.printf("[nexstatus] menu theme=%s", key)
+      end,
+    })
+  end
+
+  local chartItems = {
+    {
+      title = "長條 bars",
+      checked = prefs.chart == "bar",
+      fn = function()
+        prefs.chart = "bar"; savePrefs()
+        M.refreshTitleOnly()
+        if panel and panel:hswindow() and panel:hswindow():isVisible() then
+          panel:html(buildHTML(readSnapshot()))
+        end
+      end,
+    },
+    {
+      title = "圓圈 energy rings",
+      checked = prefs.chart == "circle",
+      fn = function()
+        prefs.chart = "circle"; savePrefs()
+        M.refreshTitleOnly()
+        if panel and panel:hswindow() and panel:hswindow():isVisible() then
+          panel:html(buildHTML(readSnapshot()))
+        end
+      end,
+    },
+  }
+
+  local glassItems = {}
+  for _, key in ipairs(GLASS_PRESET_ORDER) do
+    local p = GLASS_PRESETS[key]
+    table.insert(glassItems, {
+      title = string.format("%s  (透%d%% 模糊%d)", p.name, math.floor(p.opacity * 100 + 0.5), p.blur),
+      checked = prefs.glass_preset == key,
+      fn = function()
+        applyGlassPreset(key)
+        savePrefs()
+        M.refreshTitleOnly()
+        if panel and panel:hswindow() and panel:hswindow():isVisible() then
+          panel:html(buildHTML(readSnapshot()))
+        end
+      end,
+    })
+  end
+
+  return {
+    {
+      title = "開啟控制面板…",
+      fn = function() showPanel() end,
+    },
+    { title = "-" },
+    {
+      title = "圖表：" .. chartLabel,
+      menu = chartItems,
+    },
+    {
+      title = "主題：" .. (th.name or prefs.theme),
+      menu = themeItems,
+    },
+    {
+      title = "玻璃：" .. gLabel,
+      menu = glassItems,
+    },
+    {
+      title = string.format("透明度：%d%%", opPct),
+      menu = {
+        { title = "更透 (−5%)", fn = function() doAction("opacity-down") end },
+        { title = string.format("目前 %d%%", opPct), disabled = true },
+        { title = "更實 (+5%)", fn = function() doAction("opacity-up") end },
+      },
+    },
+    {
+      title = string.format("模糊：%d", prefs.blur or 48),
+      menu = {
+        { title = "更弱 (−6)", fn = function() doAction("blur-down") end },
+        { title = string.format("目前 %d px", prefs.blur or 48), disabled = true },
+        { title = "更強 (+6)", fn = function() doAction("blur-up") end },
+      },
+    },
+    {
+      title = string.format("飽和：%d", prefs.saturate or 190),
+      menu = {
+        { title = "更低 (−15)", fn = function() doAction("sat-down") end },
+        { title = string.format("目前 %d", prefs.saturate or 190), disabled = true },
+        { title = "更高 (+15)", fn = function() doAction("sat-up") end },
+      },
+    },
+    {
+      title = "壓力雷達",
+      checked = prefs.radar ~= false,
+      fn = function() doAction("toggle-radar") end,
+    },
+    { title = "-" },
+    {
+      title = "重新整理數據",
+      fn = function() doAction("refresh") end,
+    },
+    {
+      title = "關閉面板",
+      fn = function() hidePanel() end,
+    },
+  }
+end
+
 function M.start()
   if item then return end
   item = hs.menubar.new(true)
@@ -1291,16 +1447,18 @@ function M.start()
     hs.printf("[nexstatus] failed to create menubar")
     return
   end
-  -- Left-click opens the glass control panel
-  item:setClickCallback(function()
-    togglePanel()
-  end)
+
+  -- Native MenuBar dropdown = reliable customization (does not depend on webview buttons)
+  item:setMenu(buildMenu)
+  -- Also allow click-to-open panel as primary action via first menu item;
+  -- users discover 圖表/主題/玻璃 immediately in the same menu.
+
   M.refresh()
   timer = hs.timer.doEvery(15, function()
     M.refresh()
   end)
 
-  -- Click outside to dismiss (best-effort)
+  -- Click outside panel to dismiss (best-effort)
   M._tap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(e)
     if not (panel and panel:hswindow() and panel:hswindow():isVisible()) then
       return false
@@ -1314,7 +1472,7 @@ function M.start()
   end)
   M._tap:start()
 
-  hs.printf("[nexstatus] NexStatus MenuBar started (root=%s)", ROOT)
+  hs.printf("[nexstatus] NexStatus MenuBar started with native customize menu (root=%s)", ROOT)
 end
 
 function M.stop()
