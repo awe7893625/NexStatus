@@ -196,12 +196,13 @@ local function meterBar(label, p, col)
   ]], esc(label), col, val, w, col)
 end
 
-local function meterCircle(label, p, col)
+local function meterCircle(label, p, col, big)
   local w = p or 0
   local val = p and (tostring(p) .. "%") or "—"
+  local cls = big and "ring-item ring-item-lg" or "ring-item"
   -- r≈15.9155 → circumference 100 for easy stroke-dasharray percent
   return string.format([[
-    <div class="ring-item">
+    <div class="%s">
       <div class="ring-wrap">
         <svg viewBox="0 0 36 36" class="ring">
           <path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
@@ -212,21 +213,15 @@ local function meterCircle(label, p, col)
       </div>
       <div class="ring-label">%s</div>
     </div>
-  ]], col, w, col, val, esc(label))
+  ]], cls, col, w, col, val, esc(label))
 end
 
 local function rowHTML(opts)
   -- opts: name, badge, main, sub, bars = {{label, pct}, ...}
+  -- In circle mode, cards stay compact (text only); hero rings are rendered separately.
   local chart = prefs.chart or "bar"
   local meters = ""
-  if chart == "circle" then
-    meters = '<div class="rings">'
-    for _, b in ipairs(opts.bars or {}) do
-      local p = pct(b.pct)
-      meters = meters .. meterCircle(b.label, p, barColor(p))
-    end
-    meters = meters .. "</div>"
-  else
+  if chart ~= "circle" then
     for _, b in ipairs(opts.bars or {}) do
       local p = pct(b.pct)
       meters = meters .. meterBar(b.label, p, barColor(p))
@@ -254,6 +249,35 @@ local function rowHTML(opts)
     esc(opts.sub or ""),
     meters
   )
+end
+
+-- Reference-style "Circular Percentage Loaders" hero strip (C / G / K [/ M])
+local function heroRingsHTML(s)
+  local host = s.host or {}
+  local cl = s.claude or {}
+  local cx = s.codex or {}
+  local gk = s.grok or {}
+  local items = {
+    { "C Claude", cl.ok and cl.five_hour_pct or nil, "#D97757" },
+    { "G Codex", cx.ok and cx.five_hour_pct or nil, "#10A37F" },
+    { "K Grok", gk.ok and gk.used_pct or nil, "#BF5AF2" },
+  }
+  local mem = pct(host.mem_pct)
+  local swap = tonumber(host.swap_mb) or 0
+  if (swap >= 64) or (mem and mem >= 80) then
+    table.insert(items, { "M Mem", mem, "#0A84FF" })
+  end
+  local html = '<section class="hero-loaders"><div class="hero-title">Circular Percentage Loaders</div><div class="hero-rings">'
+  for _, it in ipairs(items) do
+    local p = pct(it[2])
+    local col = barColor(p)
+    if it[3] then col = it[3] end
+    -- keep semantic color when hot, else brand accent
+    if p and p >= 70 then col = barColor(p) end
+    html = html .. meterCircle(it[1], p, col, true)
+  end
+  html = html .. "</div></section>"
+  return html
 end
 
 local function buildHTML(s)
@@ -392,6 +416,10 @@ local function buildHTML(s)
   local th = THEMES[prefs.theme] or THEMES.glass
   local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
   local themeLabel = th.name or prefs.theme
+  local hero = ""
+  if prefs.chart == "circle" then
+    hero = heroRingsHTML(s)
+  end
 
   return string.format([[<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -481,40 +509,55 @@ local function buildHTML(s)
     text-decoration: none;
   }
   .pill:active { opacity: 0.75; }
-  .rings {
-    display: flex;
-    gap: 14px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-    justify-content: flex-start;
+  .hero-loaders {
+    background: var(--card);
+    border: 0.5px solid var(--card-border);
+    border-radius: 14px;
+    padding: 12px 12px 14px;
   }
-  .ring-item { width: 84px; text-align: center; }
-  .ring-wrap { position: relative; width: 72px; height: 72px; margin: 0 auto; }
-  .ring { width: 72px; height: 72px; }
+  .hero-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--label);
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
+  }
+  .hero-rings, .rings {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: space-around;
+  }
+  .ring-item { width: 78px; text-align: center; }
+  .ring-item-lg { width: 86px; }
+  .ring-wrap { position: relative; width: 70px; height: 70px; margin: 0 auto; }
+  .ring-item-lg .ring-wrap { width: 78px; height: 78px; }
+  .ring { width: 100%%; height: 100%%; }
   .ring-bg {
     fill: none;
     stroke: var(--track);
-    stroke-width: 2.8;
+    stroke-width: 3;
   }
   .ring-fg {
     fill: none;
-    stroke-width: 2.8;
+    stroke-width: 3;
     stroke-linecap: round;
     transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .ring-num {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 700;
+    font-size: 14px; font-weight: 700;
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.03em;
+    letter-spacing: -0.04em;
   }
+  .ring-item-lg .ring-num { font-size: 15px; }
   .ring-label {
-    margin-top: 6px;
+    margin-top: 7px;
     font-size: 10px;
     color: var(--label);
     font-weight: 600;
-    line-height: 1.2;
+    line-height: 1.25;
   }
   .list {
     display: flex;
@@ -655,6 +698,7 @@ local function buildHTML(s)
       <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
       <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
     </div>
+    %s
     <div class="list">
       %s
     </div>
@@ -687,6 +731,7 @@ local function buildHTML(s)
     th.color_scheme, th.bg, th.card, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
     esc(updated), esc(chartLabel), esc(themeLabel),
     esc(chartLabel), esc(themeLabel),
+    hero,
     cards
   )
 end
