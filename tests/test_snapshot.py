@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,13 +123,51 @@ class SnapshotContractTests(unittest.TestCase):
 
 class AntigravityHardeningTests(unittest.TestCase):
     def test_discovery_uses_same_user_exact_process_and_lsof_intersection(self) -> None:
-        outputs = ["123\n", f"{os.getuid()} /usr/local/bin/agy\n", "agy 123 user 1u IPv4 0t0 TCP 127.0.0.1:57277 (LISTEN)\n"]
-        with mock.patch.object(collector.subprocess, "check_output", side_effect=outputs) as call:
+        def fake_check_output(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+            binary = cmd[0]
+            if binary.endswith("pgrep") and cmd[-1] == "agy" and "-x" in cmd:
+                return "123\n"
+            if binary.endswith("pgrep"):
+                return ""
+            if binary.endswith("ps") or binary == "/bin/ps":
+                return f"{os.getuid()} agy /usr/local/bin/agy\n"
+            if "lsof" in binary:
+                return "agy 123 user 1u IPv4 0t0 TCP 127.0.0.1:57277 (LISTEN)\n"
+            raise subprocess.SubprocessError("unexpected")
+
+        with mock.patch.object(collector.subprocess, "check_output", side_effect=fake_check_output) as call:
             ports = collector._find_agy_listen_ports(collector.time.monotonic() + 3)
         self.assertEqual(ports, [57277])
-        lsof_command = call.call_args_list[2].args[0]
-        self.assertIn("-a", lsof_command)
-        self.assertIn("-p", lsof_command)
+        lsof_calls = [c.args[0] for c in call.call_args_list if "lsof" in c.args[0][0]]
+        self.assertTrue(lsof_calls)
+        self.assertIn("-a", lsof_calls[0])
+        self.assertIn("-p", lsof_calls[0])
+
+    def test_stale_cache_keeps_quota_when_agy_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            agy = cache / "antigravity.json"
+            good = {
+                "ok": True,
+                "source": "agy-local",
+                "plan": "Pro",
+                "used_pct": 55,
+                "session_used_pct": 55,
+                "models": [],
+                "_fetched_at_ts": collector._now() - 120,
+            }
+            agy.write_text(json.dumps(good), encoding="utf-8")
+            with mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                AGY_CACHE=agy,
+                KNOWN_CACHE_FILES=(agy,),
+            ), mock.patch.object(collector, "_find_agy_listen_ports", return_value=[]):
+                result = collector.antigravity_usage(force=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["used_pct"], 55)
+        self.assertTrue(result.get("stale"))
+        self.assertEqual(result.get("source"), "agy-cache-stale")
 
     def test_non_finite_antigravity_values_degrade_to_unknown(self) -> None:
         body = {

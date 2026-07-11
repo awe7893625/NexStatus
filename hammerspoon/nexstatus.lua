@@ -4,7 +4,17 @@
 
 local M = {}
 
-local item = _G.NexStatusMenuBar
+-- Singleton: a reloaded module must stop the previous instance first, otherwise
+-- the old timer/watchdog keeps a dead MenuBar ref and spawns a second chip.
+if type(_G.NexStatus) == "table" and type(_G.NexStatus.stop) == "function" then
+  pcall(function() _G.NexStatus.stop() end)
+end
+if _G.NexStatusMenuBar then
+  pcall(function() _G.NexStatusMenuBar:delete() end)
+  _G.NexStatusMenuBar = nil
+end
+
+local item = nil
 local timer = nil
 local panel = nil
 local redrawPanel = nil
@@ -22,11 +32,21 @@ local PANEL_W = 420
 local PANEL_H = 860
 
 -- Chart: bar | circle
--- Theme: glass | paper | mono | nord | aurora (creative)
+-- Theme: Claude / Codex studio language first, then glass material variants
 -- Glass lab: opacity / blur / saturate + named presets
 local CHART_ORDER = { "bar", "circle" }
-local THEME_ORDER = { "glass", "paper", "mono", "nord", "aurora" }
+local THEME_ORDER = { "notion", "tableau", "claude", "codex", "glass", "mono" }
+local LEGACY_THEME = { nord = "glass", aurora = "claude" }
 local GLASS_PRESET_ORDER = { "soft", "crystal", "dense", "smoke" }
+local ACCENT_ORDER = { "theme", "coral", "green", "blue", "violet", "amber" }
+local ACCENTS = {
+  theme  = nil,
+  coral  = "#D97757",
+  green  = "#10B981",
+  blue   = "#0A84FF",
+  violet = "#BF5AF2",
+  amber  = "#F59E0B",
+}
 local SECTION_ORDER = { "compute", "radar", "loaders", "providers" }
 -- Per-grid tile orders (each card cell can be reordered independently).
 local TILE_ORDER_DEFAULTS = {
@@ -42,89 +62,205 @@ local GLASS_PRESETS = {
   smoke   = { name = "煙霧", opacity = 0.52, blur = 36, saturate = 115 },
 }
 
--- RGB triples so opacity can be reapplied live
+-- Theme tokens — deliberately high-contrast personalities.
+-- Chart/status colors are theme-owned so switching recolors the whole dashboard.
 local THEMES = {
+  notion = {
+    name = "Notion",
+    blurb = "黑白文件、留白與細線",
+    color_scheme = "light",
+    bg = { 250, 250, 249 }, card = { 255, 255, 255 },
+    border = "rgba(55,53,47,0.16)", text = "#37352F",
+    muted = "rgba(55,53,47,0.68)", sub = "rgba(55,53,47,0.48)",
+    track = "rgba(55,53,47,0.12)", blue = "#2F80ED",
+    glow1 = "rgba(255,255,255,0.75)", glow2 = "rgba(235,235,232,0.55)",
+    fill = "rgba(55,53,47,0.055)", fill2 = "rgba(55,53,47,0.035)",
+    hairline = "rgba(55,53,47,0.13)", inset = "rgba(255,255,255,0.92)",
+    drop = "rgba(15,15,15,0.10)", shellBorder = "rgba(55,53,47,0.15)",
+    swatch = "linear-gradient(145deg,#FFFFFF,#E9E9E7 60%,#37352F)",
+    chart_free = "#0F9D75", chart_local = "#2F80ED",
+    chart_primary = "#37352F", chart_secondary = "#787774",
+    chart_warn = "#D9730D", chart_ok = "#0F9D75", radius = 12,
+    material = { opacity = 0.94, blur = 12, saturate = 100 },
+  },
+  tableau = {
+    name = "Tableau",
+    blurb = "分析工作台、高辨識圖表",
+    color_scheme = "dark",
+    bg = { 14, 28, 48 }, card = { 24, 45, 72 },
+    border = "rgba(130,180,225,0.24)", text = "#F4F8FC",
+    muted = "rgba(205,225,244,0.76)", sub = "rgba(175,205,232,0.58)",
+    track = "rgba(70,110,150,0.42)", blue = "#4E79A7",
+    glow1 = "rgba(78,121,167,0.48)", glow2 = "rgba(242,142,43,0.22)",
+    fill = "rgba(52,84,118,0.68)", fill2 = "rgba(18,36,58,0.76)",
+    hairline = "rgba(145,190,230,0.18)", inset = "rgba(190,220,245,0.10)",
+    drop = "rgba(0,8,20,0.55)", shellBorder = "rgba(100,155,205,0.28)",
+    swatch = "linear-gradient(145deg,#4E79A7,#F28E2B 52%,#E15759)",
+    chart_free = "#59A14F", chart_local = "#4E79A7",
+    chart_primary = "#F28E2B", chart_secondary = "#E15759",
+    chart_warn = "#EDC948", chart_ok = "#59A14F", radius = 10,
+    material = { opacity = 0.91, blur = 18, saturate = 145 },
+  },
+  claude = {
+    name = "Claude",
+    blurb = "暖橙工作室暗色",
+    color_scheme = "dark",
+    bg = { 42, 28, 22 },
+    card = { 58, 38, 30 },
+    border = "rgba(255,180,120,0.22)",
+    text = "#FFF7F0",
+    muted = "rgba(255,220,190,0.78)",
+    sub = "rgba(255,200,160,0.58)",
+    track = "rgba(140,80,50,0.45)",
+    blue = "#E07A4F",
+    glow1 = "rgba(224,122,79,0.55)",
+    glow2 = "rgba(255,170,80,0.28)",
+    fill = "rgba(90,50,35,0.72)",
+    fill2 = "rgba(50,30,22,0.78)",
+    hairline = "rgba(255,190,140,0.18)",
+    inset = "rgba(255,210,170,0.14)",
+    drop = "rgba(30,12,6,0.55)",
+    shellBorder = "rgba(255,170,110,0.28)",
+    swatch = "linear-gradient(145deg,#E07A4F,#8B4518 45%,#2A1C16)",
+    chart_free = "#F0B429",
+    chart_local = "#E07A4F",
+    chart_primary = "#E07A4F",
+    chart_secondary = "#F5C28A",
+    chart_warn = "#FFB020",
+    chart_ok = "#D4A574",
+    radius = 22,
+    material = { opacity = 0.86, blur = 36, saturate = 150 },
+  },
+  codex = {
+    name = "Codex",
+    blurb = "終端機冷綠",
+    color_scheme = "dark",
+    bg = { 4, 14, 12 },
+    card = { 10, 28, 24 },
+    border = "rgba(50,255,180,0.18)",
+    text = "#E8FFF6",
+    muted = "rgba(160,255,220,0.72)",
+    sub = "rgba(120,220,190,0.55)",
+    track = "rgba(20,80,65,0.55)",
+    blue = "#12D48A",
+    glow1 = "rgba(18,212,138,0.42)",
+    glow2 = "rgba(40,120,255,0.18)",
+    fill = "rgba(12,48,40,0.82)",
+    fill2 = "rgba(6,22,18,0.90)",
+    hairline = "rgba(80,255,190,0.14)",
+    inset = "rgba(120,255,200,0.10)",
+    drop = "rgba(0,0,0,0.55)",
+    shellBorder = "rgba(40,230,160,0.22)",
+    swatch = "linear-gradient(145deg,#12D48A,#0A3D32 50%,#040E0C)",
+    chart_free = "#12D48A",
+    chart_local = "#4CC9F0",
+    chart_primary = "#12D48A",
+    chart_secondary = "#7CF5C8",
+    chart_warn = "#F4D35E",
+    chart_ok = "#12D48A",
+    radius = 14,
+    material = { opacity = 0.90, blur = 28, saturate = 140 },
+  },
   glass = {
     name = "Glass",
+    blurb = "系統藍紫玻璃",
     color_scheme = "dark",
-    bg = { 28, 28, 30 },
-    card = { 44, 44, 46 },
-    border = "rgba(255,255,255,0.10)",
-    text = "#F5F5F7",
-    muted = "rgba(235,235,245,0.62)",
-    sub = "rgba(235,235,245,0.48)",
-    track = "rgba(120,120,128,0.28)",
-    blue = "#0A84FF",
-    glow1 = "rgba(10,132,255,0.14)",
-    glow2 = "rgba(191,90,242,0.10)",
+    bg = { 18, 22, 48 },
+    card = { 36, 42, 78 },
+    border = "rgba(140,180,255,0.28)",
+    text = "#F2F6FF",
+    muted = "rgba(200,220,255,0.74)",
+    sub = "rgba(170,200,255,0.55)",
+    track = "rgba(80,100,180,0.40)",
+    blue = "#5B8CFF",
+    glow1 = "rgba(80,140,255,0.50)",
+    glow2 = "rgba(190,90,255,0.32)",
+    fill = "rgba(70,90,160,0.40)",
+    fill2 = "rgba(40,50,100,0.50)",
+    hairline = "rgba(160,190,255,0.20)",
+    inset = "rgba(200,220,255,0.16)",
+    drop = "rgba(8,10,30,0.50)",
+    shellBorder = "rgba(150,190,255,0.30)",
+    swatch = "linear-gradient(145deg,#5B8CFF,#BF5AF2 55%,#121630)",
+    chart_free = "#34D399",
+    chart_local = "#5B8CFF",
+    chart_primary = "#5B8CFF",
+    chart_secondary = "#BF5AF2",
+    chart_warn = "#FF9F0A",
+    chart_ok = "#34D399",
+    radius = 30,
+    material = { opacity = 0.70, blur = 54, saturate = 200 },
   },
   paper = {
     name = "Paper",
+    blurb = "奶油紙亮色",
     color_scheme = "light",
-    bg = { 250, 247, 240 },
-    card = { 255, 255, 255 },
-    border = "rgba(40,30,20,0.10)",
-    text = "#1C1917",
-    muted = "rgba(60,50,40,0.62)",
-    sub = "rgba(60,50,40,0.48)",
-    track = "rgba(80,70,60,0.14)",
+    bg = { 252, 246, 232 },
+    card = { 255, 252, 245 },
+    border = "rgba(90,55,20,0.14)",
+    text = "#1A1208",
+    muted = "rgba(70,45,20,0.70)",
+    sub = "rgba(90,55,25,0.55)",
+    track = "rgba(140,100,50,0.16)",
     blue = "#C2410C",
-    glow1 = "rgba(251,191,36,0.18)",
-    glow2 = "rgba(194,65,12,0.08)",
+    glow1 = "rgba(251,191,36,0.35)",
+    glow2 = "rgba(255,255,255,0.80)",
+    fill = "rgba(180,130,70,0.10)",
+    fill2 = "rgba(255,255,255,0.70)",
+    hairline = "rgba(100,60,20,0.12)",
+    inset = "rgba(255,255,255,0.90)",
+    drop = "rgba(90,55,20,0.12)",
+    shellBorder = "rgba(120,75,30,0.16)",
+    swatch = "linear-gradient(145deg,#FFF8E8,#F0D9A8 55%,#E8C48A)",
+    chart_free = "#059669",
+    chart_local = "#C2410C",
+    chart_primary = "#C2410C",
+    chart_secondary = "#D97706",
+    chart_warn = "#B45309",
+    chart_ok = "#059669",
+    radius = 18,
+    material = { opacity = 0.96, blur = 18, saturate = 110 },
   },
   mono = {
     name = "Mono",
+    blurb = "純黑白高對比",
     color_scheme = "dark",
-    bg = { 12, 12, 12 },
-    card = { 28, 28, 28 },
-    border = "rgba(255,255,255,0.12)",
-    text = "#FAFAFA",
-    muted = "rgba(255,255,255,0.55)",
-    sub = "rgba(255,255,255,0.40)",
-    track = "rgba(255,255,255,0.12)",
-    blue = "#FAFAFA",
-    glow1 = "rgba(255,255,255,0.06)",
-    glow2 = "rgba(255,255,255,0.03)",
-  },
-  nord = {
-    name = "Nord",
-    color_scheme = "dark",
-    bg = { 46, 52, 64 },
-    card = { 59, 66, 82 },
-    border = "rgba(136,192,208,0.18)",
-    text = "#ECEFF4",
-    muted = "rgba(216,222,233,0.70)",
-    sub = "rgba(216,222,233,0.50)",
-    track = "rgba(76,86,106,0.80)",
-    blue = "#88C0D0",
-    glow1 = "rgba(136,192,208,0.14)",
-    glow2 = "rgba(129,161,193,0.10)",
-  },
-  -- Creative: polar-light aurora glass
-  aurora = {
-    name = "Aurora",
-    color_scheme = "dark",
-    bg = { 14, 20, 36 },
-    card = { 28, 38, 62 },
-    border = "rgba(165,243,252,0.22)",
-    text = "#F0FDFF",
-    muted = "rgba(186,230,253,0.72)",
-    sub = "rgba(186,230,253,0.48)",
-    track = "rgba(100,130,190,0.32)",
-    blue = "#67E8F9",
-    glow1 = "rgba(56,189,248,0.30)",
-    glow2 = "rgba(244,114,182,0.24)",
-    creative = true,
+    bg = { 0, 0, 0 },
+    card = { 14, 14, 14 },
+    border = "rgba(255,255,255,0.28)",
+    text = "#FFFFFF",
+    muted = "rgba(255,255,255,0.72)",
+    sub = "rgba(255,255,255,0.48)",
+    track = "rgba(255,255,255,0.18)",
+    blue = "#FFFFFF",
+    glow1 = "rgba(255,255,255,0.08)",
+    glow2 = "rgba(255,255,255,0.04)",
+    fill = "rgba(255,255,255,0.08)",
+    fill2 = "rgba(255,255,255,0.04)",
+    hairline = "rgba(255,255,255,0.20)",
+    inset = "rgba(255,255,255,0.10)",
+    drop = "rgba(0,0,0,0.70)",
+    shellBorder = "rgba(255,255,255,0.28)",
+    swatch = "linear-gradient(145deg,#FFFFFF 0%,#666 35%,#000 100%)",
+    chart_free = "#FFFFFF",
+    chart_local = "#A0A0A0",
+    chart_primary = "#FFFFFF",
+    chart_secondary = "#888888",
+    chart_warn = "#FFFFFF",
+    chart_ok = "#CCCCCC",
+    radius = 8,
+    material = { opacity = 0.98, blur = 8, saturate = 80 },
   },
 }
 
 local prefs = {
   chart = "bar",
-  theme = "glass",
+  theme = "claude",
+  accent = "theme",
   glass_preset = "crystal",
-  opacity = 0.72,
-  blur = 48,
-  saturate = 190,
+  opacity = 0.78,
+  blur = 42,
+  saturate = 160,
   radar = true, -- creative Pressure Radar + Quota Weather
   density = "comfortable",
   edit_layout = false,
@@ -222,7 +358,13 @@ local function loadPrefs()
     return
   end
   if data.chart == "bar" or data.chart == "circle" then prefs.chart = data.chart end
-  if THEMES[data.theme] then prefs.theme = data.theme end
+  if type(data.theme) == "string" then
+    local tid = LEGACY_THEME[data.theme] or data.theme
+    if THEMES[tid] then prefs.theme = tid end
+  end
+  if type(data.accent) == "string" and (data.accent == "theme" or ACCENTS[data.accent]) then
+    prefs.accent = data.accent
+  end
   if data.radar == false then prefs.radar = false else prefs.radar = true end
   if data.density == "compact" or data.density == "comfortable" then
     prefs.density = data.density
@@ -238,7 +380,7 @@ local function loadPrefs()
   if GLASS_PRESETS[prefs.glass_preset] and data.opacity == nil then
     applyGlassPreset(prefs.glass_preset)
   else
-    prefs.opacity = clamp(data.opacity or prefs.opacity, 0.35, 0.98)
+    prefs.opacity = clamp(data.opacity or prefs.opacity, 0.18, 0.98)
     prefs.blur = clamp(data.blur or prefs.blur, 8, 80)
     prefs.saturate = clamp(data.saturate or prefs.saturate, 80, 240)
   end
@@ -255,6 +397,7 @@ local function savePrefs()
   f:write(hs.json.encode({
     chart = prefs.chart,
     theme = prefs.theme,
+    accent = prefs.accent,
     glass_preset = prefs.glass_preset,
     opacity = prefs.opacity,
     blur = prefs.blur,
@@ -291,6 +434,161 @@ local function glassLabel()
   if prefs.glass_preset == "custom" then return "自訂" end
   local p = GLASS_PRESETS[prefs.glass_preset]
   return (p and p.name) or "玻璃"
+end
+
+local function accentLabel()
+  if prefs.accent == "theme" or not prefs.accent then return "跟隨主題" end
+  local names = {
+    coral = "Claude 橙",
+    green = "Codex 綠",
+    blue = "系統藍",
+    violet = "紫羅蘭",
+    amber = "琥珀",
+  }
+  return names[prefs.accent] or prefs.accent
+end
+
+local function resolvedTheme()
+  return THEMES[prefs.theme] or THEMES.claude
+end
+
+local function resolvedAccent(th)
+  th = th or resolvedTheme()
+  if prefs.accent and prefs.accent ~= "theme" and ACCENTS[prefs.accent] then
+    return ACCENTS[prefs.accent]
+  end
+  return th.blue
+end
+
+local function chromeTokens()
+  local th = resolvedTheme()
+  local op = clamp(prefs.opacity, 0.18, 0.98)
+  local cardOp = clamp(op, 0.18, 0.98)
+  local blur = clamp(prefs.blur, 8, 80)
+  local sat = clamp(prefs.saturate, 80, 240)
+  local accent = resolvedAccent(th)
+  return {
+    th = th,
+    op = op,
+    cardOp = cardOp,
+    blur = blur,
+    sat = sat,
+    accent = accent,
+    bgCss = rgba(th.bg, op),
+    cardCss = rgba(th.card, cardOp),
+    isLight = th.color_scheme == "light",
+    radius = tonumber(th.radius) or 28,
+    chart_free = th.chart_free or "#30D158",
+    chart_local = th.chart_local or "#64D2FF",
+    chart_primary = th.chart_primary or accent,
+    chart_secondary = th.chart_secondary or accent,
+    chart_warn = th.chart_warn or "#FF9F0A",
+    chart_ok = th.chart_ok or "#30D158",
+  }
+end
+
+-- Live-apply theme/material without full HTML rebuild (no flash).
+local function applyChromeLive()
+  if not panel then return false end
+  local c = chromeTokens()
+  local th = c.th
+  local js = string.format([[
+    (function () {
+      var r = document.documentElement.style;
+      var map = {
+        "--bg": %q, "--card": %q, "--card-border": %q, "--label": %q,
+        "--text": %q, "--sub": %q, "--track": %q, "--blue": %q,
+        "--glow1": %q, "--glow2": %q, "--fill": %q, "--fill-2": %q,
+        "--hairline": %q, "--inset": %q, "--drop": %q, "--shell-border": %q,
+        "--blur": %q, "--sat": %q,
+        "--radius": %q,
+        "--chart-free": %q, "--chart-local": %q,
+        "--chart-primary": %q, "--chart-secondary": %q,
+        "--chart-warn": %q, "--chart-ok": %q
+      };
+      Object.keys(map).forEach(function (k) { r.setProperty(k, map[k]); });
+      document.documentElement.style.colorScheme = %q;
+      var shell = document.querySelector(".shell");
+      if (shell) {
+        shell.classList.toggle("is-light", %s);
+        shell.classList.toggle("is-dark", %s);
+        shell.setAttribute("data-theme", %q);
+      }
+      document.querySelectorAll(".theme-chip").forEach(function (el) {
+        var id = (el.getAttribute("data-action") || "").replace("theme:", "");
+        el.classList.toggle("is-active", id === %q);
+      });
+      document.querySelectorAll(".accent-dot").forEach(function (el) {
+        var id = (el.getAttribute("data-action") || "").replace("accent:", "");
+        el.classList.toggle("is-active", id === %q);
+      });
+      document.querySelectorAll(".seg-item[data-glass]").forEach(function (el) {
+        el.classList.toggle("is-active", el.getAttribute("data-glass") === %q);
+      });
+      var stamp = document.querySelector(".stamp");
+      if (stamp) {
+        var bits = stamp.textContent.split(" · ");
+        if (bits.length >= 3) {
+          bits[2] = %q;
+          bits[bits.length - 1] = "透" + %d + "%%";
+          stamp.textContent = bits.join(" · ");
+        }
+      }
+      var accentLab = document.querySelector("[data-accent-label]");
+      if (accentLab) accentLab.textContent = %q;
+      var glassLab = document.querySelector("[data-glass-label]");
+      if (glassLab) glassLab.textContent = %q;
+      var opLab = document.querySelector('[data-lab="opacity"]');
+      if (opLab) opLab.textContent = %d + "%%";
+      var blurLab = document.querySelector('[data-lab="blur"]');
+      if (blurLab) blurLab.textContent = String(%d);
+      var satLab = document.querySelector('[data-lab="sat"]');
+      if (satLab) satLab.textContent = String(%d);
+    })();
+  ]],
+    c.bgCss, c.cardCss, th.border, th.muted,
+    th.text, th.sub, th.track, c.accent,
+    th.glow1, th.glow2, th.fill or "rgba(120,120,128,0.16)", th.fill2 or "rgba(120,120,128,0.10)",
+    th.hairline or th.border, th.inset or "rgba(255,255,255,0.10)",
+    th.drop or "rgba(0,0,0,0.28)", th.shellBorder or th.border,
+    tostring(c.blur) .. "px", tostring(c.sat) .. "%",
+    tostring(c.radius) .. "px",
+    c.chart_free, c.chart_local, c.chart_primary, c.chart_secondary, c.chart_warn, c.chart_ok,
+    th.color_scheme,
+    c.isLight and "true" or "false",
+    (not c.isLight) and "true" or "false",
+    prefs.theme,
+    prefs.theme,
+    prefs.accent or "theme",
+    prefs.glass_preset or "crystal",
+    th.name or prefs.theme,
+    math.floor(c.op * 100 + 0.5),
+    accentLabel(),
+    glassLabel(),
+    math.floor(c.op * 100 + 0.5),
+    c.blur,
+    c.sat
+  )
+  local ok = pcall(function() panel:evaluateJavaScript(js) end)
+  return ok
+end
+
+-- Material-only tweaks can soft-apply; theme identity needs full redraw so
+-- inline chart/ring colors (built in HTML) also switch.
+local function softChromeOrRedraw(forceFull)
+  if forceFull then
+    if redrawPanel then redrawPanel() end
+    return
+  end
+  if panel then
+    local visible = false
+    pcall(function()
+      local w = panel:hswindow()
+      visible = w and w:isVisible() or false
+    end)
+    if visible and applyChromeLive() then return end
+  end
+  if redrawPanel then redrawPanel() end
 end
 
 loadPrefs()
@@ -375,10 +673,20 @@ end
 
 local function barColor(v)
   if v == nil then return "#8E8E93" end
-  if v >= 90 then return "#FF453A" end -- system red
-  if v >= 70 then return "#FF9F0A" end -- system orange
-  if v >= 40 then return "#0A84FF" end -- system blue
-  return "#30D158" -- system green
+  local th = resolvedTheme()
+  if v >= 90 then return "#FF453A" end
+  if v >= 70 then return th.chart_warn or th.blue or "#FF9F0A" end
+  if v >= 40 then return th.chart_primary or th.blue or "#0A84FF" end
+  return th.chart_ok or th.chart_free or "#30D158"
+end
+
+local function applyThemeMaterial(tid)
+  local th = THEMES[tid]
+  if not th or type(th.material) ~= "table" then return end
+  prefs.opacity = clamp(th.material.opacity or prefs.opacity, 0.18, 0.98)
+  prefs.blur = clamp(th.material.blur or prefs.blur, 8, 80)
+  prefs.saturate = clamp(th.material.saturate or prefs.saturate, 80, 240)
+  prefs.glass_preset = "custom"
 end
 
 local function esc(s)
@@ -444,6 +752,16 @@ local TOKEN_KPI_META = {
   ["7d"] = { label = "近 7 日", accent = "#0A84FF" },
   ["30d"] = { label = "近 30 日", accent = "#0A84FF" },
 }
+
+local function themedSourceAccent(id, fallback)
+  local th = resolvedTheme()
+  if id == "free" then return th.chart_free or fallback end
+  if id == "local" then return th.chart_local or fallback end
+  if id == "claude" then return th.chart_primary or th.blue or fallback end
+  if id == "codex" then return th.chart_secondary or th.blue or fallback end
+  if id == "3d" or id == "7d" or id == "30d" then return th.chart_primary or th.blue or fallback end
+  return fallback
+end
 local SECTION_META = {
   compute = { label = "算力與 Token", fixed = true },
   radar = { label = "壓力雷達" },
@@ -1386,10 +1704,13 @@ local function buildHTML(s)
   local agSub = ag.error or "啟動 agy / Antigravity CLI 後顯示"
   local agBars = {}
   if ag.ok then
-    agMain = pctText(ag.used_pct or ag.session_used_pct) .. " · 最緊模型窗"
+    local agStale = ag.stale == true
+    agMain = pctText(ag.used_pct or ag.session_used_pct)
+      .. (agStale and " · 快取" or " · 最緊模型窗")
     agSub = string.format(
-      "%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
+      "%s%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
       tostring(ag.plan or "—"),
+      agStale and " · 上次連線" or "",
       tostring(ag.prompt_credits_available or "—"),
       tostring(ag.prompt_credits_monthly or "—"),
       tostring(ag.flow_credits_available or "—"),
@@ -1495,16 +1816,19 @@ local function buildHTML(s)
     updated = "更新 " .. tostring(s.polled_at):sub(12, 19) .. " UTC"
   end
 
-  local th = THEMES[prefs.theme] or THEMES.glass
+  local chrome = chromeTokens()
+  local th = chrome.th
   local chartLabel = (prefs.chart == "circle") and "圓圈" or "長條"
   local themeLabel = th.name or prefs.theme
   local gLabel = glassLabel()
-  local op = clamp(prefs.opacity, 0.35, 0.98)
-  local cardOp = clamp(op + 0.08, 0.40, 0.99)
-  local blur = clamp(prefs.blur, 8, 80)
-  local sat = clamp(prefs.saturate, 80, 240)
-  local bgCss = rgba(th.bg, op)
-  local cardCss = rgba(th.card, cardOp)
+  local aLabel = accentLabel()
+  local op = chrome.op
+  local blur = chrome.blur
+  local sat = chrome.sat
+  local bgCss = chrome.bgCss
+  local cardCss = chrome.cardCss
+  local isLight = chrome.isLight
+  local accent = chrome.accent
   local hero = ""
   if prefs.chart == "circle" then
     hero = heroRingsHTML(s)
@@ -1521,27 +1845,59 @@ local function buildHTML(s)
     orderedSections = orderedSections .. (sections[id] or "")
   end
   local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s) .. layoutReorderSheetHTML()
-  local auroraCSS = ""
-  if prefs.theme == "aurora" then
-    auroraCSS = [[
-  .shell.aurora::before {
-    content: "";
-    position: absolute; inset: 0; border-radius: 24px; pointer-events: none;
-    background:
-      radial-gradient(70% 50% at 15% 20%, rgba(56,189,248,0.28), transparent 55%),
-      radial-gradient(60% 45% at 85% 30%, rgba(244,114,182,0.22), transparent 50%),
-      radial-gradient(50% 40% at 50% 100%, rgba(52,211,153,0.16), transparent 55%);
-    animation: auroraShift 9s ease-in-out infinite alternate;
-    opacity: 0.9;
-  }
-  @keyframes auroraShift {
-    from { filter: hue-rotate(0deg); transform: scale(1); }
-    to { filter: hue-rotate(28deg); transform: scale(1.03); }
-  }
-  .shell.aurora { position: relative; overflow: hidden; }
-  .shell.aurora > * { position: relative; z-index: 1; }
-]]
+
+  local themeCards = ""
+  for _, tid in ipairs(THEME_ORDER) do
+    local tmeta = THEMES[tid]
+    if tmeta then
+      themeCards = themeCards .. string.format(
+        [[<button type="button" class="theme-chip%s" data-action="theme:%s" role="option" aria-selected="%s" title="%s">
+            <span class="theme-chip-swatch" style="background:%s"></span>
+            <span class="theme-chip-name">%s</span>
+          </button>]],
+        (prefs.theme == tid) and " is-active" or "",
+        esc(tid),
+        (prefs.theme == tid) and "true" or "false",
+        esc((tmeta.blurb or tmeta.name)),
+        tmeta.swatch or "#888",
+        esc(tmeta.name)
+      )
+    end
   end
+
+  local accentDots = ""
+  local accentTitles = {
+    theme = "跟隨主題",
+    coral = "Claude 橙",
+    green = "Codex 綠",
+    blue = "系統藍",
+    violet = "紫羅蘭",
+    amber = "琥珀",
+  }
+  for _, aid in ipairs(ACCENT_ORDER) do
+    local color = ACCENTS[aid]
+    if aid == "theme" then color = th.blue end
+    accentDots = accentDots .. string.format(
+      [[<button type="button" class="accent-dot%s" data-action="accent:%s" aria-label="%s" title="%s" style="--dot:%s"></button>]],
+      (prefs.accent == aid) and " is-active" or "",
+      esc(aid),
+      esc(accentTitles[aid] or aid),
+      esc(accentTitles[aid] or aid),
+      color or th.blue
+    )
+  end
+
+  local glassSeg = ""
+  for _, gid in ipairs(GLASS_PRESET_ORDER) do
+    local gmeta = GLASS_PRESETS[gid]
+    glassSeg = glassSeg .. string.format(
+      [[<button type="button" class="seg-item%s" data-action="glass:%s" data-glass="%s">%s</button>]],
+      (prefs.glass_preset == gid) and " is-active" or "",
+      esc(gid), esc(gid), esc((gmeta and gmeta.name) or gid)
+    )
+  end
+
+  local auroraCSS = ""
 
   return string.format([[<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -1561,8 +1917,22 @@ local function buildHTML(s)
     --blue: %s;
     --glow1: %s;
     --glow2: %s;
+    --fill: %s;
+    --fill-2: %s;
+    --hairline: %s;
+    --inset: %s;
+    --drop: %s;
+    --shell-border: %s;
     --blur: %dpx;
     --sat: %d%%;
+    --radius: %dpx;
+    --chart-free: %s;
+    --chart-local: %s;
+    --chart-primary: %s;
+    --chart-secondary: %s;
+    --chart-warn: %s;
+    --chart-ok: %s;
+    --ease: cubic-bezier(.22,1,.36,1);
   }
   * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
   html, body {
@@ -1574,36 +1944,117 @@ local function buildHTML(s)
     background: transparent;
     color: var(--text);
   }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translateY(-8px) scale(.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
   .shell {
     height: 100%%;
-    padding: 16px 14px 12px;
+    padding: 14px 12px 10px;
     background:
-      radial-gradient(120%% 80%% at 0%% 0%%, var(--glow1), transparent 52%%),
-      radial-gradient(100%% 70%% at 100%% 100%%, var(--glow2), transparent 48%%),
+      radial-gradient(130%% 90%% at 0%% 0%%, var(--glow1), transparent 55%%),
+      radial-gradient(110%% 80%% at 100%% 100%%, var(--glow2), transparent 50%%),
       var(--bg);
-    border-radius: 30px;
-    border: 0.5px solid rgba(255,255,255,0.18);
+    border-radius: var(--radius, 30px);
+    border: 0.5px solid var(--shell-border);
     box-shadow:
-      0 32px 80px rgba(0,0,0,0.52),
-      0 1px 0 rgba(255,255,255,0.20) inset,
-      0 0 0 0.5px rgba(0,0,0,0.24) inset;
+      0 28px 70px var(--drop),
+      0 1px 0 var(--inset) inset,
+      0 0 0 0.5px rgba(0,0,0,0.18) inset;
+    animation: panelIn .28s cubic-bezier(.22,1,.36,1) both;
     backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     display: flex;
     flex-direction: column;
     gap: 0;
     overflow: hidden;
+    transition: background .28s var(--ease), border-color .28s var(--ease),
+      border-radius .28s var(--ease), box-shadow .28s var(--ease);
   }
+  .shell.is-light {
+    box-shadow:
+      0 22px 54px var(--drop),
+      0 1px 0 var(--inset) inset,
+      0 0 0 0.5px rgba(70,50,30,0.08) inset;
+  }
+  /* Theme personalities — large structural differences, not just tint. */
+  .shell[data-theme="notion"] { padding:18px 15px 12px; }
+  .shell[data-theme="notion"] .ledger-overview,
+  .shell[data-theme="notion"] .card,
+  .shell[data-theme="notion"] .kpi {
+    border-radius:8px; box-shadow:none; background:var(--card); border:1px solid var(--hairline);
+  }
+  .shell[data-theme="notion"] .section-kicker { letter-spacing:.03em; text-transform:none; }
+  .shell[data-theme="notion"] .title { font-family:ui-serif,"New York",Georgia,serif; letter-spacing:-.025em; }
+  .shell[data-theme="notion"] .source-line-chart { background:var(--fill-2); border:1px solid var(--hairline); }
+  .shell[data-theme="tableau"] { padding:10px 10px 8px; }
+  .shell[data-theme="tableau"] .ledger-overview,
+  .shell[data-theme="tableau"] .card { border-radius:10px; box-shadow:0 10px 24px var(--drop); }
+  .shell[data-theme="tableau"] .kpi { border-radius:7px; border-left:3px solid var(--chart-primary); }
+  .shell[data-theme="tableau"] .source-line-chart { border-radius:8px; border:1px solid var(--hairline); }
+  .shell[data-theme="tableau"] .priority-head,
+  .shell[data-theme="tableau"] .section-kicker { text-transform:uppercase; letter-spacing:.09em; }
+  .shell[data-theme="claude"] .title span { color: var(--blue); }
+  .shell[data-theme="claude"] .ledger-overview {
+    background:
+      linear-gradient(145deg, rgba(224,122,79,.22), transparent 55%%),
+      var(--card);
+  }
+  .shell[data-theme="codex"] {
+    font-variant-numeric: tabular-nums;
+  }
+  .shell[data-theme="codex"] .ledger-overview,
+  .shell[data-theme="codex"] .card {
+    border-style: solid;
+    border-width: 1px;
+    box-shadow: 0 0 0 1px rgba(18,212,138,.08), 0 12px 28px var(--drop);
+  }
+  .shell[data-theme="codex"] .title {
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-size: 13px;
+  }
+  .shell[data-theme="glass"] { border-radius: 30px; }
+  .shell[data-theme="glass"] .ledger-overview,
+  .shell[data-theme="glass"] .card {
+    border-radius: 24px;
+    backdrop-filter: blur(24px) saturate(180%%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%%);
+  }
+  .shell[data-theme="paper"] {
+    background:
+      radial-gradient(90%% 70%% at 10%% 0%%, rgba(255,255,255,.95), transparent 50%%),
+      radial-gradient(80%% 60%% at 100%% 100%%, rgba(251,191,36,.20), transparent 55%%),
+      var(--bg);
+  }
+  .shell[data-theme="paper"] .card,
+  .shell[data-theme="paper"] .ledger-overview {
+    box-shadow: 0 1px 0 #fff inset, 0 8px 22px rgba(90,55,20,.10);
+  }
+  .shell[data-theme="mono"] .card,
+  .shell[data-theme="mono"] .ledger-overview,
+  .shell[data-theme="mono"] .kpi {
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,.22);
+    background: #0A0A0A;
+  }
+  .shell[data-theme="mono"] .customize .btn.primary {
+    background: #0A84FF; color: #fff !important;
+  }
+  .shell[data-theme="mono"] .title span { color: #fff; opacity: .55; }
   .data {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 2px 2px 8px;
+    gap: 10px;
+    padding: 2px 2px 6px;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    scroll-behavior: smooth;
   }
+  .data::-webkit-scrollbar { width: 0; height: 0; }
   .dashboard-section { position: relative; border-radius: 24px; }
   .section-content { position: relative; border-radius: inherit; outline: none; }
   .section-content[data-sheet-open] { cursor: pointer; }
@@ -1753,13 +2204,23 @@ local function buildHTML(s)
   .shell.is-compact .machine-list, .shell.is-compact .priority-head, .shell.is-compact .source-strip { display: none; }
   .customize {
     flex: 0 0 auto;
-    border-top: 1px solid var(--card-border);
-    padding: 8px 4px 4px;
+    border-top: .5px solid rgba(255,255,255,0.10);
+    padding: 10px 6px 6px;
     margin-top: 2px;
-    background: linear-gradient(180deg, rgba(0,0,0,0.12), transparent 28px);
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0.18), transparent 40px),
+      rgba(28,28,30,0.42);
     display: flex;
     flex-direction: column;
     gap: 8px;
+    backdrop-filter: blur(28px) saturate(170%%);
+    -webkit-backdrop-filter: blur(28px) saturate(170%%);
+  }
+  .shell.is-light .customize {
+    border-top-color: rgba(60,60,67,0.12);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.55), transparent 40px),
+      rgba(242,242,247,0.55);
   }
 %s
   .top {
@@ -1770,11 +2231,13 @@ local function buildHTML(s)
   }
   .top-actions { display: flex; gap: 6px; }
   .top-button {
-    appearance: none; border: .5px solid rgba(255,255,255,.10); border-radius: 999px;
-    padding: 6px 10px; color: var(--text); background: rgba(120,120,128,.18);
-    font: inherit; font-size: 10px; font-weight: 700; cursor: pointer;
+    appearance: none; border: .5px solid var(--hairline); border-radius: 999px;
+    padding: 7px 12px; color: var(--text); background: var(--fill);
+    font: inherit; font-size: 11px; font-weight: 650; cursor: pointer;
+    min-height: 30px; transition: transform .12s ease, opacity .12s ease, background .15s ease;
   }
-  .top-button.is-active { color: white; background: var(--blue); }
+  .top-button:active { transform: scale(.97); opacity: .88; }
+  .top-button.is-active { color: #fff; background: var(--blue); border-color: transparent; }
   .title {
     font-size: 15px;
     font-weight: 700;
@@ -1795,15 +2258,14 @@ local function buildHTML(s)
   }
   .ledger-overview {
     background:
-      linear-gradient(145deg, rgba(255,255,255,0.09), rgba(255,255,255,0.015)),
+      linear-gradient(145deg, var(--inset), transparent 55%%),
       var(--card);
     border: 0.5px solid var(--card-border);
-    border-radius: 24px;
-    padding: 16px;
+    border-radius: 22px;
+    padding: 14px;
     box-shadow:
-      0 1px 0 rgba(255,255,255,0.12) inset,
-      0 18px 38px rgba(0,0,0,0.18),
-      0 0 0 0.5px rgba(255,255,255,.06) inset;
+      0 1px 0 var(--inset) inset,
+      0 14px 32px var(--drop);
   }
   .ledger-head {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -1820,8 +2282,8 @@ local function buildHTML(s)
     font-size: 11px; color: var(--sub); white-space: nowrap;
   }
   .status-dot {
-    width: 7px; height: 7px; border-radius: 50%%; background: #FF9F0A;
-    box-shadow: 0 0 0 3px rgba(255,159,10,0.12);
+    width: 7px; height: 7px; border-radius: 50%%; background: var(--chart-warn);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--chart-warn) 22%%, transparent);
   }
   .kpi-grid {
     display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
@@ -1829,8 +2291,8 @@ local function buildHTML(s)
   .kpi {
     min-width: 0; padding: 10px 11px;
     border-radius: 14px;
-    background: rgba(120,120,128,0.13);
-    border: 0.5px solid rgba(255,255,255,0.07);
+    background: var(--fill);
+    border: 0.5px solid var(--hairline);
   }
   .kpi span, .kpi small { display: block; color: var(--sub); font-size: 11px; }
   .kpi strong {
@@ -1848,8 +2310,9 @@ local function buildHTML(s)
   .priority-head { margin: 12px 0 6px; font-size: 11px; font-weight: 650; color: var(--label); }
   .source-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
   .source-chip {
-    min-width: 0; padding: 7px 8px; border-radius: 11px;
-    background: rgba(120,120,128,0.12);
+    min-width: 0; padding: 8px 9px; border-radius: 12px;
+    background: var(--fill);
+    border: 0.5px solid var(--hairline);
   }
   .source-chip span, .source-chip b, .source-chip small {
     display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1871,7 +2334,7 @@ local function buildHTML(s)
   }
   .cost-chip {
     min-width: 0; padding: 10px 11px; border-radius: 14px;
-    background: rgba(120,120,128,0.13); border: 0.5px solid rgba(255,255,255,0.07);
+    background: var(--fill); border: 0.5px solid var(--hairline);
   }
   .cost-chip span { display: block; font-size: 11px; color: var(--sub); }
   .cost-chip b {
@@ -1879,78 +2342,193 @@ local function buildHTML(s)
     font-variant-numeric: tabular-nums; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis;
   }
+  /*
+   * Customize strip uses locked Apple Control Center tokens.
+   * Theme may recolor the dashboard, but control labels stay readable.
+   */
+  .customize {
+    --ctl-text: rgba(245,245,247,0.98);
+    --ctl-sub: rgba(235,235,245,0.68);
+    --ctl-fill: rgba(120,120,128,0.30);
+    --ctl-fill-2: rgba(120,120,128,0.20);
+    --ctl-border: rgba(255,255,255,0.14);
+    --ctl-surface: rgba(44,44,46,0.78);
+    --ctl-active: rgba(10,132,255,0.28);
+  }
+  .shell.is-light .customize {
+    --ctl-text: rgba(28,28,30,0.96);
+    --ctl-sub: rgba(60,60,67,0.68);
+    --ctl-fill: rgba(120,120,128,0.14);
+    --ctl-fill-2: rgba(120,120,128,0.10);
+    --ctl-border: rgba(60,60,67,0.16);
+    --ctl-surface: rgba(255,255,255,0.82);
+    --ctl-active: rgba(10,132,255,0.14);
+  }
   .appearance summary {
-    list-style: none; cursor: pointer; padding: 7px 8px;
-    border-radius: 11px; font-size: 12px; font-weight: 650;
-    color: var(--label); background: rgba(120,120,128,0.12);
+    list-style: none; cursor: pointer; padding: 11px 14px;
+    border-radius: 12px; font-size: 15px; font-weight: 600;
+    color: var(--ctl-text); background: var(--ctl-surface);
+    border: .5px solid var(--ctl-border);
     -webkit-user-select: none; user-select: none;
+    backdrop-filter: blur(20px) saturate(160%%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%%);
   }
   .appearance summary::-webkit-details-marker { display: none; }
-  .appearance summary::after { content: "⌄"; float: right; font-size: 14px; }
+  .appearance summary::after { content: "⌄"; float: right; font-size: 13px; color: var(--ctl-sub); }
   .appearance[open] summary::after { content: "⌃"; }
-  .appearance-body { display: flex; flex-direction: column; gap: 7px; padding-top: 8px; }
-  .toolbar {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    padding: 0 2px 2px;
+  .appearance-body {
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 12px 2px 4px;
   }
-  .customize-head {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    color: var(--label);
-    padding: 2px 4px 0;
+  .ctl-group {
+    display: flex; flex-direction: column; gap: 8px;
+    min-height: 0;
+  }
+  .ctl-label {
+    font-size: 12px; font-weight: 600;
+    color: var(--ctl-sub);
+    letter-spacing: -0.01em;
+    padding: 0 2px;
+  }
+  .picker-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; min-height: 18px;
+  }
+  .picker-row .ctl-label { padding: 0; }
+  .picker-meta {
+    font-size: 12px; color: var(--ctl-sub); font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Fixed 5-col chip grid — never reflows when selection changes */
+  .theme-picker {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .theme-chip {
+    appearance: none; border: .5px solid var(--ctl-border);
+    border-radius: 12px; padding: 8px 4px 7px;
+    min-height: 68px;
+    background: var(--ctl-fill-2);
+    color: var(--ctl-text);
+    font: inherit; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px;
+    transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
+  }
+  .theme-chip-swatch {
+    width: 28px; height: 28px; border-radius: 8px; flex: 0 0 auto;
+    border: .5px solid rgba(255,255,255,0.18);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset, 0 4px 10px rgba(0,0,0,0.18);
+  }
+  .shell.is-light .theme-chip-swatch {
+    border-color: rgba(60,60,67,0.14);
+    box-shadow: 0 1px 0 #fff inset, 0 3px 8px rgba(0,0,0,0.08);
+  }
+  .theme-chip-name {
+    font-size: 10px; font-weight: 700; letter-spacing: -0.01em;
+    color: var(--ctl-text); line-height: 1.1; text-align: center;
+  }
+  .theme-chip.is-active {
+    border-color: rgba(10,132,255,0.55);
+    background: var(--ctl-active);
+    box-shadow: 0 0 0 1px rgba(10,132,255,0.22);
+  }
+  .theme-chip:active { opacity: .88; }
+  .accent-row {
+    display: flex; gap: 10px; align-items: center;
+    min-height: 32px; padding: 2px 2px 0;
+  }
+  .accent-dot {
+    appearance: none; border: 0; width: 28px; height: 28px; border-radius: 50%%;
+    background: var(--dot, #0A84FF); cursor: pointer; padding: 0; flex: 0 0 auto;
+    box-shadow: 0 0 0 1.5px var(--ctl-border), 0 1px 0 rgba(255,255,255,0.12) inset;
+    transition: box-shadow .14s ease, transform .1s ease;
+  }
+  .accent-dot.is-active {
+    box-shadow: 0 0 0 2px var(--ctl-surface), 0 0 0 4px #0A84FF;
+    transform: scale(1.05);
+  }
+  .accent-dot:active { transform: scale(.95); }
+  .seg {
+    display: grid; grid-template-columns: repeat(4, minmax(0,1fr));
+    gap: 2px; padding: 3px; border-radius: 11px;
+    min-height: 38px;
+    background: var(--ctl-fill-2); border: .5px solid var(--ctl-border);
+  }
+  .seg-item {
+    appearance: none; border: 0; border-radius: 9px;
+    min-height: 32px; padding: 6px 2px; font: inherit;
+    font-size: 12px; font-weight: 650; color: var(--ctl-sub);
+    background: transparent; cursor: pointer;
+    transition: background .12s ease, color .12s ease;
+  }
+  .seg-item.is-active {
+    color: var(--ctl-text); background: var(--ctl-fill);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.10) inset;
+  }
+  .seg-item:active { opacity: .85; }
+  .toolbar {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    min-height: 34px; padding: 0 1px;
   }
   .pill {
-    font-size: 11px;
-    font-weight: 700;
+    appearance: none;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
     letter-spacing: -0.01em;
-    color: var(--text);
-    background: rgba(10,132,255,0.22);
-    border: 1px solid rgba(10,132,255,0.35);
+    color: var(--ctl-text);
+    background: var(--ctl-fill);
+    border: .5px solid var(--ctl-border);
     border-radius: 999px;
-    padding: 6px 11px;
+    padding: 7px 12px;
+    min-height: 32px;
+    cursor: pointer;
     text-decoration: none;
   }
-  .pill:active { opacity: 0.75; }
+  .pill:active { opacity: 0.78; }
   .lab {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
     gap: 6px;
-    padding: 2px;
   }
   .lab-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 4px;
-    background: var(--card);
-    border: 1px solid var(--card-border);
-    border-radius: 10px;
-    padding: 7px 8px;
+    min-height: 40px;
+    background: var(--ctl-surface);
+    border: .5px solid var(--ctl-border);
+    border-radius: 11px;
+    padding: 6px 8px;
     font-size: 11px;
-    color: var(--label);
-    font-weight: 700;
+    color: var(--ctl-sub);
+    font-weight: 650;
   }
   .lab-row .lab-val {
-    color: var(--text);
+    color: var(--ctl-text);
     font-variant-numeric: tabular-nums;
-    min-width: 2.4em;
+    min-width: 2.6em;
     text-align: center;
+    font-weight: 700;
   }
   .step {
-    width: 20px; height: 20px;
+    appearance: none; border: 0;
+    width: 26px; height: 26px;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 6px;
-    background: rgba(120,120,128,0.28);
-    color: var(--text);
+    border-radius: 8px;
+    background: var(--ctl-fill);
+    color: var(--ctl-text);
     text-decoration: none;
-    font-size: 13px;
+    font: inherit;
+    font-size: 14px;
     font-weight: 700;
     line-height: 1;
+    cursor: pointer;
   }
-  .step:active { opacity: 0.7; }
+  .step:active { opacity: 0.7; transform: scale(.96); }
   .radar {
     display: flex;
     gap: 12px;
@@ -2053,67 +2631,69 @@ local function buildHTML(s)
   .card {
     background: var(--card);
     border: 0.5px solid var(--card-border);
-    border-radius: 22px;
+    border-radius: 20px;
     padding: 11px 13px 12px;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.10) inset, 0 10px 24px rgba(0,0,0,.10);
+    box-shadow: 0 1px 0 var(--inset) inset, 0 10px 24px var(--drop);
   }
   .sheet-backdrop {
     position: fixed; inset: 0; z-index: 20; opacity: 0; pointer-events: none;
-    background: rgba(0,0,0,.34); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
-    transition: opacity .24s ease;
+    background: rgba(0,0,0,.36); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    transition: opacity .26s ease;
   }
   .detail-sheet {
     position: fixed; z-index: 21; left: 8px; right: 8px; bottom: 8px; height: 78%%;
     display: flex; flex-direction: column; padding: 10px 14px 14px;
-    border-radius: 28px; border: .5px solid rgba(255,255,255,.20);
-    background: linear-gradient(155deg, rgba(70,70,74,.92), rgba(28,28,30,.86));
+    border-radius: 28px; border: .5px solid var(--shell-border);
+    background:
+      linear-gradient(160deg, var(--inset), transparent 40%%),
+      var(--card);
     backdrop-filter: blur(54px) saturate(180%%); -webkit-backdrop-filter: blur(54px) saturate(180%%);
-    box-shadow: 0 -18px 60px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.18) inset;
-    transform: translateY(calc(100%% + 16px)); opacity: 0;
-    transition: transform .34s cubic-bezier(.22,1,.36,1), opacity .22s ease;
+    box-shadow: 0 -16px 50px var(--drop), 0 1px 0 var(--inset) inset;
+    transform: translateY(calc(100%% + 18px)); opacity: 0;
+    transition: transform .36s cubic-bezier(.22,1,.36,1), opacity .24s ease;
   }
   body.sheet-open .sheet-backdrop[aria-hidden="false"] { opacity: 1; pointer-events: auto; }
   body.sheet-open .detail-sheet[aria-hidden="false"] { transform: translateY(0); opacity: 1; }
-  .sheet-grabber { width: 38px; height: 5px; margin: 0 auto 10px; border-radius: 9px; background: rgba(235,235,245,.34); }
+  .sheet-grabber { width: 38px; height: 5px; margin: 0 auto 10px; border-radius: 9px; background: var(--fill); }
   .sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-  .sheet-head span { font-size: 10px; color: rgba(235,235,245,.58); font-weight: 700; letter-spacing: .08em; }
-  .sheet-head h2 { margin: 3px 0 0; font-size: 22px; letter-spacing: -.045em; }
-  .sheet-close { border-radius: 50%%; font-size: 20px; }
+  .sheet-head span { font-size: 10px; color: var(--sub); font-weight: 700; letter-spacing: .08em; }
+  .sheet-head h2 { margin: 3px 0 0; font-size: 22px; letter-spacing: -.045em; color: var(--text); }
+  .sheet-close { border-radius: 50%%; font-size: 20px; background: var(--fill); color: var(--text); }
   .sheet-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; margin: 14px 0 8px; }
-  .sheet-summary div { padding: 10px; border-radius: 15px; background: rgba(120,120,128,.18); }
+  .sheet-summary div { padding: 10px; border-radius: 15px; background: var(--fill); border: .5px solid var(--hairline); }
   .sheet-summary span, .sheet-summary b { display: block; }
-  .sheet-summary span { font-size: 10px; color: rgba(235,235,245,.58); }
-  .sheet-summary b { margin-top: 4px; font-size: 15px; font-variant-numeric: tabular-nums; }
-  .sheet-scroll { min-height: 0; overflow: auto; padding: 2px 1px 8px; }
-  .sheet-scroll h3 { margin: 14px 4px 6px; font-size: 11px; color: rgba(235,235,245,.58); letter-spacing: .05em; }
-  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 11px; border-radius: 14px; background: rgba(120,120,128,.14); margin-bottom: 6px; }
+  .sheet-summary span { font-size: 10px; color: var(--sub); }
+  .sheet-summary b { margin-top: 4px; font-size: 15px; font-variant-numeric: tabular-nums; color: var(--text); }
+  .sheet-scroll { min-height: 0; overflow: auto; padding: 2px 1px 8px; overscroll-behavior: contain; }
+  .sheet-scroll h3 { margin: 14px 4px 6px; font-size: 11px; color: var(--sub); letter-spacing: .05em; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 11px; border-radius: 14px; background: var(--fill); border: .5px solid var(--hairline); margin-bottom: 6px; }
   .detail-row b, .detail-row small { display: block; }
-  .detail-row b { font-size: 12px; }
-  .detail-row small { margin-top: 3px; color: rgba(235,235,245,.54); font-size: 10px; }
+  .detail-row b { font-size: 12px; color: var(--text); }
+  .detail-row small { margin-top: 3px; color: var(--sub); font-size: 10px; }
   .detail-money { text-align: right; font-variant-numeric: tabular-nums; }
-  .detail-empty, .meaning-note { padding: 11px; border-radius: 14px; color: rgba(235,235,245,.60); background: rgba(120,120,128,.12); font-size: 11px; line-height: 1.45; }
-  .token-dot { background: #30D158; box-shadow: 0 0 0 3px rgba(48,209,88,.14); }
+  .detail-empty, .meaning-note { padding: 11px; border-radius: 14px; color: var(--sub); background: var(--fill-2); font-size: 11px; line-height: 1.45; }
+  .token-dot { background: var(--chart-free); box-shadow: 0 0 0 3px color-mix(in srgb, var(--chart-free) 25%%, transparent); }
   .token-overview .ledger-status { padding-right: 28px; }
-  .token-share-track, .token-row-track { height: 5px; overflow: hidden; border-radius: 99px; background: rgba(120,120,128,.20); }
+  .token-share-track, .token-row-track { height: 5px; overflow: hidden; border-radius: 99px; background: var(--track); }
   .token-share-track { margin-top: 11px; }
-  .token-share-track span, .token-row-track span { display: block; height: 100%%; border-radius: inherit; background: linear-gradient(90deg,#0A84FF,#64D2FF); }
-  .local-kpi strong { color: #64D2FF; }
+  .token-share-track span, .token-row-track span { display: block; height: 100%%; border-radius: inherit; background: linear-gradient(90deg,var(--chart-primary),var(--chart-secondary)); }
+  .local-kpi strong { color: var(--chart-local); }
   .token-trend { margin-top:11px; padding:10px 11px 8px; border-radius:15px; background:rgba(120,120,128,.11); }
   .trend-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:7px; color:var(--sub); font-size:9px; }
   .trend-head span { color:var(--text); font-weight:700; }
   .trend-bars { display:flex; align-items:flex-end; gap:2px; height:48px; }
-  .trend-bars span { flex:1; min-width:2px; border-radius:3px 3px 1px 1px; background:linear-gradient(180deg,#64D2FF,#0A84FF); opacity:.82; transition:height .22s cubic-bezier(.22,1,.36,1),opacity .15s; }
+  .trend-bars span { flex:1; min-width:2px; border-radius:3px 3px 1px 1px; background:linear-gradient(180deg,var(--chart-secondary),var(--chart-primary)); opacity:.88; transition:height .22s cubic-bezier(.22,1,.36,1),opacity .15s; }
   .trend-bars span:hover { opacity:1; }
-  .compute-line-chart { margin-top:11px; padding:10px 11px 9px; border-radius:15px; background:linear-gradient(180deg,rgba(100,210,255,.08),rgba(120,120,128,.08)); overflow:hidden; }
+  .compute-line-chart { margin-top:11px; padding:10px 11px 9px; border-radius:15px; background:linear-gradient(180deg,color-mix(in srgb,var(--chart-local) 14%%, transparent),var(--fill-2)); overflow:hidden; }
   .compute-line-chart svg { display:block; width:100%%; height:82px; overflow:visible; }
-  .chart-grid { fill:none; stroke:rgba(235,235,245,.10); stroke-width:.7; vector-effect:non-scaling-stroke; }
+  .chart-grid { fill:none; stroke:var(--hairline); stroke-width:.7; vector-effect:non-scaling-stroke; }
   .compute-line { fill:none; stroke-width:2.3; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
-  .free-line { stroke:#30D158; filter:drop-shadow(0 2px 3px rgba(48,209,88,.22)); }
-  .local-line { stroke:#64D2FF; filter:drop-shadow(0 2px 3px rgba(100,210,255,.22)); }
+  .free-line { stroke:var(--chart-free); filter:drop-shadow(0 2px 4px color-mix(in srgb,var(--chart-free) 35%%, transparent)); }
+  .local-line { stroke:var(--chart-local); filter:drop-shadow(0 2px 4px color-mix(in srgb,var(--chart-local) 35%%, transparent)); }
   .line-legend { display:flex; justify-content:space-between; gap:12px; margin-top:3px; font-size:9px; color:var(--sub); }
   .line-legend span::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%%; }
-  .free-legend::before { background:#30D158; }
-  .local-legend::before { background:#64D2FF; }
+  .free-legend::before { background:var(--chart-free); }
+  .local-legend::before { background:var(--chart-local); }
   .line-legend b { margin-left:4px; color:var(--text); font-variant-numeric:tabular-nums; }
   .source-line-chart { margin:10px 0 12px; padding:11px; border-radius:17px; background:rgba(120,120,128,.11); }
   .source-line-chart svg { display:block; width:100%%; height:110px; }
@@ -2128,13 +2708,13 @@ local function buildHTML(s)
   .source-legend small { color:var(--sub); }
   .claude-legend span::before { background:#D97757; }
   .codex-legend span::before { background:#10A37F; }
-  .free-cloud-legend span::before { background:#30D158; }
-  .local-compute-legend span::before { background:#64D2FF; }
+  .free-cloud-legend span::before { background:var(--chart-free); }
+  .local-compute-legend span::before { background:var(--chart-local); }
   .other-legend span::before { background:#BF5AF2; }
   .source-legend:last-child { grid-column:1 / -1; }
-  .window-tabs { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: rgba(120,120,128,.16); }
-  .window-tabs button { appearance: none; border: 0; border-radius: 10px; height: 31px; color: rgba(235,235,245,.58); background: transparent; font: inherit; font-size: 11px; font-weight: 700; }
-  .window-tabs button.is-active { color: white; background: rgba(120,120,128,.34); box-shadow: 0 1px 5px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.10) inset; }
+  .window-tabs { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: var(--fill); }
+  .window-tabs button { appearance: none; border: 0; border-radius: 10px; height: 32px; color: var(--sub); background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .window-tabs button.is-active { color: var(--text); background: var(--card); box-shadow: 0 1px 4px var(--drop), 0 1px 0 var(--inset) inset; }
   .window-panel { display: none; }
   .window-panel.is-active { display: block; }
   .window-hero { display: flex; align-items: baseline; gap: 8px; padding: 13px; border-radius: 17px; background: linear-gradient(145deg,rgba(10,132,255,.24),rgba(100,210,255,.08)); }
@@ -2163,7 +2743,7 @@ local function buildHTML(s)
   .lens-token-head span,.lens-token-head strong { display:block; }
   .lens-token-head span { color:var(--sub); font-size:9px; font-weight:750; letter-spacing:.09em; }
   .lens-token-head strong { margin-top:2px; font-size:15px; letter-spacing:-.025em; }
-  .lens-detail-link { appearance:none; border:0; border-radius:99px; padding:7px 10px; color:#64D2FF; background:rgba(100,210,255,.11); font:inherit; font-size:10px; font-weight:700; cursor:pointer; }
+  .lens-detail-link { appearance:none; border:0; border-radius:99px; padding:7px 10px; color:var(--chart-local); background:color-mix(in srgb,var(--chart-local) 14%%, transparent); font:inherit; font-size:10px; font-weight:700; cursor:pointer; }
   .compute-lens .kpi { padding:9px 10px; }
   .compute-lens .kpi strong { font-size:20px; }
   .window-kpi { appearance:none; border:0; color:inherit; text-align:left; font:inherit; cursor:pointer; }
@@ -2175,12 +2755,12 @@ local function buildHTML(s)
   .other-metric { grid-column:1 / -1; min-height:58px !important; }
   .claude-metric b { color:#D97757; }
   .codex-metric b { color:#10A37F; }
-  .free-metric b { color:#30D158; }
-  .local-metric b { color:#64D2FF; }
+  .free-metric b { color:var(--chart-free); }
+  .local-metric b { color:var(--chart-local); }
   .ledger-actions { display:flex; gap:5px; }
   .ledger-actions button { appearance:none; border:0; border-radius:99px; padding:6px 9px; color:var(--sub); background:rgba(120,120,128,.18); font:inherit; font-size:9px; font-weight:700; cursor:pointer; }
   .ledger-actions button:hover { color:var(--text); background:rgba(120,120,128,.28); }
-  .compute-dot { background: #64D2FF; box-shadow: 0 0 0 3px rgba(100,210,255,.14); }
+  .compute-dot { background: var(--chart-local); box-shadow: 0 0 0 3px color-mix(in srgb, var(--chart-local) 22%%, transparent); }
   .compute-overview .ledger-status { padding-right: 28px; }
   .compute-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .compute-stat { padding: 11px; border-radius: 15px; background: rgba(120,120,128,.14); }
@@ -2192,7 +2772,7 @@ local function buildHTML(s)
   .combined-stat strong { grid-column: 2; grid-row: 1/3; font-size: 24px; }
   .free-stat strong { color: #30D158; } .local-stat strong { color: #64D2FF; }
   .compute-ratio { display: flex; height: 7px; margin-top: 11px; overflow: hidden; border-radius: 99px; background: rgba(120,120,128,.2); }
-  .compute-ratio span { height: 100%%; } .free-ratio { background: #30D158; } .local-ratio { background: #64D2FF; }
+  .compute-ratio span { height: 100%%; } .free-ratio { background: var(--chart-free); } .local-ratio { background: var(--chart-local); }
   .compute-purpose { display: flex; gap: 8px; align-items: baseline; margin-top: 10px; font-size: 10px; }
   .compute-purpose span { color: var(--sub); } .compute-purpose b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .compute-trust { display:flex; justify-content:space-between; gap:8px; margin-top:9px; font-size:10px; color:var(--sub); }
@@ -2302,11 +2882,11 @@ local function buildHTML(s)
   }
   .btn {
     appearance: none;
-    border: 0;
-    border-radius: 10px;
-    height: 36px;
+    border: .5px solid var(--ctl-border, var(--hairline));
+    border-radius: 12px;
+    height: 40px;
     font: inherit;
-    font-size: 12px;
+    font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
     cursor: pointer;
@@ -2314,23 +2894,29 @@ local function buildHTML(s)
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text);
-    background: rgba(120,120,128,0.28);
+    color: var(--ctl-text, var(--text));
+    background: var(--ctl-fill, var(--fill));
     transition: background 0.15s ease, transform 0.1s ease;
     -webkit-user-select: none;
     user-select: none;
   }
   .btn:active { transform: scale(0.98); }
   .btn.primary {
-    background: var(--blue);
-    color: white;
+    background: #0A84FF;
+    color: #ffffff !important;
+    border-color: transparent;
+    text-shadow: none;
   }
+  /* Accent may recolor primary, but label must stay white for contrast */
+  .customize .btn.primary { background: var(--blue, #0A84FF); color: #fff !important; }
+  .shell.is-light .sheet-backdrop { background: rgba(40,28,16,.28); }
   .hint {
     grid-column: 1 / -1;
     text-align: center;
-    font-size: 10px;
-    color: var(--sub);
+    font-size: 11px;
+    color: var(--ctl-sub, var(--sub));
     margin-top: 2px;
+    font-weight: 500;
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
@@ -2350,7 +2936,7 @@ local function buildHTML(s)
 </style>
 </head>
 <body>
-  <div class="shell%s">
+  <div class="shell%s" data-theme="%s">
     <div class="top">
       <div class="title">NexStatus<span>成本中心</span></div>
       <div class="top-actions">
@@ -2368,39 +2954,58 @@ local function buildHTML(s)
       <details class="appearance">
         <summary>外觀與顯示</summary>
         <div class="appearance-body">
-          <div class="toolbar">
-            <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
-            <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
-            <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
-            <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
-            <a class="pill" href="#" data-action="reset-layout">重設排序</a>
+          <div class="ctl-group">
+            <div class="ctl-label">主題</div>
+            <div class="theme-picker" role="listbox" aria-label="主題">%s</div>
           </div>
-          <div class="lab">
-            <div class="lab-row">
-              <span>透明度</span>
-              <a class="step" href="#" data-action="opacity-down" aria-label="降低透明度">−</a>
-              <span class="lab-val">%d%%</span>
-              <a class="step" href="#" data-action="opacity-up" aria-label="提高透明度">+</a>
+          <div class="ctl-group">
+            <div class="picker-row">
+              <span class="ctl-label">強調色</span>
+              <span class="picker-meta" data-accent-label>%s</span>
             </div>
-            <div class="lab-row">
-              <span>模糊</span>
-              <a class="step" href="#" data-action="blur-down" aria-label="降低模糊">−</a>
-              <span class="lab-val">%d</span>
-              <a class="step" href="#" data-action="blur-up" aria-label="提高模糊">+</a>
+            <div class="accent-row" role="listbox" aria-label="強調色">%s</div>
+          </div>
+          <div class="ctl-group">
+            <div class="picker-row">
+              <span class="ctl-label">材質</span>
+              <span class="picker-meta" data-glass-label>%s</span>
             </div>
-            <div class="lab-row">
-              <span>飽和</span>
-              <a class="step" href="#" data-action="sat-down" aria-label="降低飽和度">−</a>
-              <span class="lab-val">%d</span>
-              <a class="step" href="#" data-action="sat-up" aria-label="提高飽和度">+</a>
+            <div class="seg" role="group" aria-label="玻璃材質">%s</div>
+          </div>
+          <div class="ctl-group">
+            <div class="ctl-label">微調</div>
+            <div class="lab">
+              <div class="lab-row">
+                <span>材質不透明度</span>
+                <button type="button" class="step" data-action="opacity-down" aria-label="降低透明度">−</button>
+                <span class="lab-val" data-lab="opacity">%d%%</span>
+                <button type="button" class="step" data-action="opacity-up" aria-label="提高透明度">+</button>
+              </div>
+              <div class="lab-row">
+                <span>模糊</span>
+                <button type="button" class="step" data-action="blur-down" aria-label="降低模糊">−</button>
+                <span class="lab-val" data-lab="blur">%d</span>
+                <button type="button" class="step" data-action="blur-up" aria-label="提高模糊">+</button>
+              </div>
+              <div class="lab-row">
+                <span>飽和</span>
+                <button type="button" class="step" data-action="sat-down" aria-label="降低飽和度">−</button>
+                <span class="lab-val" data-lab="sat">%d</span>
+                <button type="button" class="step" data-action="sat-up" aria-label="提高飽和度">+</button>
+              </div>
             </div>
+          </div>
+          <div class="toolbar">
+            <button type="button" class="pill" data-action="cycle-chart">圖表：%s</button>
+            <button type="button" class="pill" data-action="toggle-radar">雷達：%s</button>
+            <button type="button" class="pill" data-action="reset-layout">重設排序</button>
           </div>
         </div>
       </details>
       <div class="actions">
-        <a class="btn primary" href="#" data-action="refresh">重新整理</a>
-        <a class="btn" href="#" data-action="close">關閉</a>
-        <div class="hint">設定會即時套用到上方資料區 · 記住在本機 prefs</div>
+        <button type="button" class="btn primary" data-action="refresh">重新整理</button>
+        <button type="button" class="btn" data-action="close">關閉</button>
+        <div class="hint">設定記住在本機 · 控制列保持高對比可讀</div>
       </div>
     </div>
   </div>
@@ -2604,18 +3209,33 @@ local function buildHTML(s)
   </script>
 </body>
 </html>]],
-    th.color_scheme, bgCss, cardCss, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
+    th.color_scheme, bgCss, cardCss, th.border, th.muted, th.text, th.sub, th.track, accent, th.glow1, th.glow2,
+    th.fill or "rgba(120,120,128,0.16)",
+    th.fill2 or "rgba(120,120,128,0.10)",
+    th.hairline or th.border,
+    th.inset or "rgba(255,255,255,0.10)",
+    th.drop or "rgba(0,0,0,0.28)",
+    th.shellBorder or th.border,
     blur, sat,
+    chrome.radius or 28,
+    chrome.chart_free, chrome.chart_local, chrome.chart_primary, chrome.chart_secondary,
+    chrome.chart_warn, chrome.chart_ok,
     auroraCSS,
-    ((prefs.theme == "aurora") and " aurora" or "") ..
-      ((prefs.density == "compact") and " is-compact" or ""),
+    ((prefs.density == "compact") and " is-compact" or "") ..
+      (isLight and " is-light" or " is-dark"),
+    prefs.theme,
     prefs.density == "compact" and "展開" or "精簡",
     esc(updated), esc(chartLabel), esc(themeLabel), math.floor(op * 100 + 0.5),
     -- data zone
     orderedSections,
     -- customize zone
-    esc(chartLabel), esc(themeLabel), esc(gLabel), prefs.radar and "開" or "關",
+    themeCards,
+    esc(aLabel),
+    accentDots,
+    esc(gLabel),
+    glassSeg,
     math.floor(op * 100 + 0.5), blur, sat,
+    esc(chartLabel), prefs.radar and "開" or "關",
     detailSheets
   )
 end
@@ -2625,14 +3245,34 @@ local function positionPanel()
   if not panel then return end
   local screen = hs.screen.mainScreen()
   local sf = screen:fullFrame()
-  -- Top-right under menu bar
+  -- Top-right under menu bar, clamp height to visible frame
+  local maxH = math.min(PANEL_H, math.floor(sf.h * 0.88))
   local x = sf.x + sf.w - PANEL_W - 14
   local y = sf.y + 28
-  panel:frame(hs.geometry.rect(x, y, PANEL_W, PANEL_H))
+  panel:frame(hs.geometry.rect(x, y, PANEL_W, maxH))
 end
 
+local panelFadeTimer = nil
+
 local function hidePanel()
-  if panel then
+  if not panel then return end
+  if panelFadeTimer then
+    panelFadeTimer:stop()
+    panelFadeTimer = nil
+  end
+  local steps, i = 6, 0
+  if panel.alpha then
+    panelFadeTimer = hs.timer.doEvery(0.016, function()
+      i = i + 1
+      local a = 1 - (i / steps)
+      pcall(function() panel:alpha(math.max(0, a)) end)
+      if i >= steps then
+        if panelFadeTimer then panelFadeTimer:stop(); panelFadeTimer = nil end
+        panel:hide()
+        pcall(function() panel:alpha(1) end)
+      end
+    end)
+  else
     panel:hide()
   end
 end
@@ -2641,7 +3281,16 @@ end
 local suppressOutsideUntil = 0
 
 redrawPanel = function()
-  if panel then panel:html(buildHTML(readSnapshot())) end
+  if not panel then return end
+  local visible = false
+  pcall(function()
+    local w = panel:hswindow()
+    visible = w and w:isVisible() or false
+  end)
+  panel:html(buildHTML(readSnapshot()))
+  if visible then
+    pcall(function() panel:alpha(1) end)
+  end
 end
 
 local function handleAction(action)
@@ -2725,15 +3374,42 @@ local function handleAction(action)
     savePrefs()
     redrawPanel()
   elseif action == "cycle-theme" then
+    local prevScheme = resolvedTheme().color_scheme
     prefs.theme = cycleList(THEME_ORDER, prefs.theme)
+    applyThemeMaterial(prefs.theme)
     savePrefs()
-    redrawPanel()
+    -- Full redraw only when light/dark flips — avoids control-strip jump.
+    softChromeOrRedraw(prevScheme ~= resolvedTheme().color_scheme)
+  elseif action:match("^theme:[a-z]+$") then
+    local tid = action:match("^theme:([a-z]+)$")
+    if THEMES[tid] then
+      local prevScheme = resolvedTheme().color_scheme
+      prefs.theme = tid
+      applyThemeMaterial(tid)
+      savePrefs()
+      softChromeOrRedraw(prevScheme ~= resolvedTheme().color_scheme)
+    end
+  elseif action:match("^accent:[a-z]+$") then
+    local aid = action:match("^accent:([a-z]+)$")
+    if aid == "theme" or ACCENTS[aid] then
+      prefs.accent = aid
+      savePrefs()
+      -- Accent never needs full reflow — soft recolor only.
+      softChromeOrRedraw(false)
+    end
+  elseif action:match("^glass:[a-z]+$") then
+    local gid = action:match("^glass:([a-z]+)$")
+    if GLASS_PRESETS[gid] then
+      applyGlassPreset(gid)
+      savePrefs()
+      softChromeOrRedraw()
+    end
   elseif action == "cycle-glass" then
     local cur = prefs.glass_preset
     if cur == "custom" then cur = "crystal" end
     applyGlassPreset(cycleList(GLASS_PRESET_ORDER, cur))
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "toggle-radar" then
     prefs.radar = not prefs.radar
     savePrefs()
@@ -2754,35 +3430,35 @@ local function handleAction(action)
     savePrefs()
     redrawPanel()
   elseif action == "opacity-up" then
-    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) + 0.05, 0.35, 0.98) * 100 + 0.5) / 100
+    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) + 0.10, 0.18, 0.98) * 100 + 0.5) / 100
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "opacity-down" then
-    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) - 0.05, 0.35, 0.98) * 100 + 0.5) / 100
+    prefs.opacity = math.floor(clamp((prefs.opacity or 0.72) - 0.10, 0.18, 0.98) * 100 + 0.5) / 100
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "blur-up" then
     prefs.blur = clamp((prefs.blur or 48) + 6, 8, 80)
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "blur-down" then
     prefs.blur = clamp((prefs.blur or 48) - 6, 8, 80)
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "sat-up" then
     prefs.saturate = clamp((prefs.saturate or 190) + 15, 80, 240)
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "sat-down" then
     prefs.saturate = clamp((prefs.saturate or 190) - 15, 80, 240)
     markGlassCustom()
     savePrefs()
-    redrawPanel()
+    softChromeOrRedraw()
   elseif action == "close" then
     hidePanel()
   end
@@ -2848,13 +3524,33 @@ local function showPanel()
   local s = readSnapshot()
   local html = buildHTML(s)
   ensurePanel()
+  if panelFadeTimer then
+    panelFadeTimer:stop()
+    panelFadeTimer = nil
+  end
   panel:html(html)
   positionPanel()
+  -- Soft open: avoid hard pop-in under the MenuBar.
+  pcall(function() panel:alpha(0) end)
   panel:show()
   panel:bringToFront(true)
+  if panel.alpha then
+    local steps, i = 7, 0
+    panelFadeTimer = hs.timer.doEvery(0.016, function()
+      i = i + 1
+      local a = i / steps
+      pcall(function() panel:alpha(math.min(1, a)) end)
+      if i >= steps then
+        if panelFadeTimer then panelFadeTimer:stop(); panelFadeTimer = nil end
+        pcall(function() panel:alpha(1) end)
+      end
+    end)
+  else
+    pcall(function() panel:alpha(1) end)
+  end
   -- Grace period: MenuBar click is outside the panel frame; without this,
   -- the outside-dismiss eventtap closes the dashboard on the same click.
-  suppressOutsideUntil = hs.timer.secondsSinceEpoch() + 0.55
+  suppressOutsideUntil = hs.timer.secondsSinceEpoch() + 0.65
   if panel.hswindow and panel:hswindow() then
     pcall(function() panel:hswindow():focus() end)
   end
@@ -2995,16 +3691,34 @@ function M.refreshTitleOnly()
     body = body .. " M" .. tostring(mem)
   end
   local pr = pressureFromSnapshot(s)
-  -- The menu bar is a glanceable entry point, not a second dashboard. Keep
-  -- provider percentages in the tooltip/panel so crowded macOS menu bars stay calm.
+  -- MenuBar: C=Claude 5h · G=Codex 5h · H=host pressure index (CPU+MEM+vm pressure).
+  -- H is hardware load — not the AI quota weather score shown inside the panel radar.
   local function menuPct(ok, value)
     if not ok or value == nil then return "—" end
     return tostring(math.floor((tonumber(value) or 0) + .5)) .. "%"
   end
-  local pressureLabel = (pr.score >= 80 and "P!" or "P") .. tostring(math.floor(pr.score + .5)) .. "%"
-  local title = string.format("C%s G%s %s", menuPct(cl.ok, cl.five_hour_pct), menuPct(cx.ok, cx.five_hour_pct), pressureLabel)
+  local hostLoad = tonumber(host.pressure_pct)
+  if hostLoad == nil then
+    -- Backward compatible with older snapshots that only had mem/cpu.
+    local cpu = tonumber(host.cpu_pct) or 0
+    local memV = tonumber(host.mem_pct) or 0
+    hostLoad = math.floor(0.55 * memV + 0.45 * cpu + 0.5)
+  end
+  hostLoad = math.max(0, math.min(100, math.floor(hostLoad + 0.5)))
+  local hostLabel = (hostLoad >= 80 and "H!" or "H") .. tostring(hostLoad) .. "%"
+  local title = string.format(
+    "C%s G%s %s",
+    menuPct(cl.ok, cl.five_hour_pct),
+    menuPct(cx.ok, cx.five_hour_pct),
+    hostLabel
+  )
   local tip = string.format(
-    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nA = Antigravity %s (%s)\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下開啟儀表板",
+    "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %.0f MB\nAI 額度雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nA = Antigravity %s (%s)\nOpenCode Go %s\n點一下開啟儀表板",
+    hostLoad,
+    tostring(host.pressure or "—"):gsub(" 🟢", ""):gsub(" 🟡", ""):gsub(" 🔴", ""),
+    pctText(host.cpu_pct),
+    pctText(mem),
+    swap,
     pr.score,
     pr.weather,
     pctText(cl.five_hour_pct),
@@ -3012,9 +3726,7 @@ function M.refreshTitleOnly()
     pctText(gk.used_pct),
     pctText(ag.used_pct or ag.session_used_pct),
     tostring(ag.plan or "—"),
-    pctText(go.used_pct),
-    pctText(mem),
-    swap
+    pctText(go.used_pct)
   )
 
   applyMenubarIcon()
@@ -3037,26 +3749,30 @@ function M.refresh()
 end
 
 function M.start()
-  -- Hard reset menubar so a dead item never blocks re-registration
+  -- Hard reset: stop timers first so a reloaded instance cannot race-create a
+  -- second MenuBar chip (orphan timers from a previous module chunk).
+  if timer then pcall(function() timer:stop() end); timer = nil end
+  if M._watch then pcall(function() M._watch:stop() end); M._watch = nil end
+  if M._tap then pcall(function() M._tap:stop() end); M._tap = nil end
+  if panelFadeTimer then pcall(function() panelFadeTimer:stop() end); panelFadeTimer = nil end
+  if collectorWatchdog then pcall(function() collectorWatchdog:stop() end); collectorWatchdog = nil end
+  if collectorTask then
+    pcall(function() if collectorTask:isRunning() then collectorTask:terminate() end end)
+    collectorTask = nil
+  end
+  refreshQueued = false
+
   if item then
     pcall(function() item:delete() end)
     item = nil
   end
+  if _G.NexStatusMenuBar then
+    pcall(function() _G.NexStatusMenuBar:delete() end)
+    _G.NexStatusMenuBar = nil
+  end
   if panel then
     pcall(function() panel:delete() end)
     panel = nil
-  end
-  if timer then
-    pcall(function() timer:stop() end)
-    timer = nil
-  end
-  if M._tap then
-    pcall(function() M._tap:stop() end)
-    M._tap = nil
-  end
-  if M._watch then
-    pcall(function() M._watch:stop() end)
-    M._watch = nil
   end
 
   if not ensureMenubarItem() then
@@ -3073,10 +3789,10 @@ function M.start()
   -- Watchdog: if MenuBar item disappears, recreate (every 30s)
   M._watch = hs.timer.doEvery(30, function()
     if not ensureMenubarItem() then return end
-    -- If title somehow empty, force refresh
+    -- Title is "C..% G..% H..%" — empty/whitespace only means paint failed.
     local t = nil
     pcall(function() t = item:title() end)
-    if type(t) ~= "string" or t:match("%S") == nil or t:find("NS") == nil then
+    if type(t) ~= "string" or t:match("%S") == nil then
       M.refreshTitleOnly()
     end
   end)
@@ -3114,22 +3830,30 @@ function M.start()
 end
 
 function M.stop()
-  if timer then timer:stop(); timer = nil end
+  if timer then pcall(function() timer:stop() end); timer = nil end
   refreshQueued = false
-  if collectorWatchdog then collectorWatchdog:stop(); collectorWatchdog = nil end
+  if panelFadeTimer then pcall(function() panelFadeTimer:stop() end); panelFadeTimer = nil end
+  if collectorWatchdog then pcall(function() collectorWatchdog:stop() end); collectorWatchdog = nil end
   if collectorTask then
     pcall(function()
       if collectorTask:isRunning() then collectorTask:terminate() end
     end)
     collectorTask = nil
   end
-  if M._watch then M._watch:stop(); M._watch = nil end
-  if M._tap then M._tap:stop(); M._tap = nil end
+  if M._watch then pcall(function() M._watch:stop() end); M._watch = nil end
+  if M._tap then pcall(function() M._tap:stop() end); M._tap = nil end
   if panel then
-    panel:delete()
+    pcall(function() panel:delete() end)
     panel = nil
   end
-  if item then item:delete(); item = nil end
+  if item then
+    pcall(function() item:delete() end)
+    item = nil
+  end
+  if _G.NexStatusMenuBar then
+    pcall(function() _G.NexStatusMenuBar:delete() end)
+    _G.NexStatusMenuBar = nil
+  end
   hs.printf("[nexstatus] NexStatus stopped")
 end
 

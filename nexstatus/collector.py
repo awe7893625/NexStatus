@@ -29,6 +29,7 @@ CACHE_DIR = Path(os.environ.get("NEXSTATUS_CACHE", os.path.expanduser("~/.cache/
 OUT = CACHE_DIR / "status.json"
 GROK_CACHE = CACHE_DIR / "grok-billing.json"
 GO_CACHE = CACHE_DIR / "opencode-go.json"
+CLAUDE_CACHE = CACHE_DIR / "claude-usage.json"
 CLAUDE_STATUS = Path(os.path.expanduser("~/.claude/usage-status.json"))
 CLAUDE_LEGACY = Path(os.path.expanduser("~/.claude/usag-status.json"))
 CLAUDE_TT = Path(os.path.expanduser("~/.claude/tt-status.json"))
@@ -41,18 +42,29 @@ GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 GROK_TTL = 5 * 60  # seconds — billing is monthly, no need to hammer API
 GO_TTL_OK = 5 * 60
 GO_TTL_CAPPED = 15 * 60  # when already at limit, probe less often
+CLAUDE_FRESH_TTL = 90  # recent sanitized status/cache freshness window
+CLAUDE_TTL = 6 * 60 * 60  # last-known-good quota when statusLine omits rate_limits
 # Official OpenCode Go caps (https://opencode.ai/docs/go/#usage-limits)
 GO_CAP_5H_USD = 12.0
 GO_CAP_WEEK_USD = 30.0
 GO_CAP_MONTH_USD = 60.0
 AGY_CACHE = CACHE_DIR / "antigravity.json"
-AGY_TTL = 60  # local LS probe is cheap; still avoid hammering
+AGY_TTL = 90  # live LS probe interval while agy is up
+AGY_STALE_TTL = 6 * 60 * 60  # keep last-known-good when CLI briefly exits
 AGY_RPC = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
 AGY_MAX_PORTS = 4
 AGY_MAX_MODELS = 12
 AGY_MAX_RESPONSE_BYTES = 256 * 1024
 AGY_TOTAL_DEADLINE = 4.0
-KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE)
+# Process names / path fragments that legitimately host the Antigravity LS.
+AGY_COMM_NAMES = frozenset({"agy", "agy-node", "Antigravity", "antigravity"})
+AGY_PATH_MARKERS = (
+    "/Antigravity/",
+    "/antigravity/",
+    "/bin/agy",
+    "agy-node",
+)
+KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE)
 
 
 def _now() -> float:
@@ -140,6 +152,50 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _claude_rate_windows(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Extract 5h / 7d windows from several Claude Code statusLine shapes."""
+    rl = data.get("rate_limits") if isinstance(data.get("rate_limits"), dict) else {}
+    five = rl.get("five_hour") if isinstance(rl.get("five_hour"), dict) else {}
+    seven = rl.get("seven_day") if isinstance(rl.get("seven_day"), dict) else {}
+    # Newer payloads sometimes nest under utilization / limits.
+    if not five and not seven:
+        for key in ("utilization", "limits", "usage", "quota"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                if isinstance(nested.get("five_hour"), dict):
+                    five = nested["five_hour"]
+                if isinstance(nested.get("seven_day"), dict):
+                    seven = nested["seven_day"]
+                if isinstance(nested.get("rate_limits"), dict):
+                    sub = nested["rate_limits"]
+                    five = five or (sub.get("five_hour") if isinstance(sub.get("five_hour"), dict) else {})
+                    seven = seven or (sub.get("seven_day") if isinstance(sub.get("seven_day"), dict) else {})
+    return five, seven
+
+
+def _claude_from_cache(max_age: float = CLAUDE_TTL) -> dict[str, Any] | None:
+    if not CLAUDE_CACHE.is_file():
+        return None
+    try:
+        cached = json.loads(CLAUDE_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(cached, dict) or not cached.get("ok"):
+        return None
+    age = _now() - float(cached.get("_fetched_at_ts") or 0)
+    if age > max_age:
+        return None
+    if cached.get("five_hour_pct") is None and cached.get("seven_day_pct") is None:
+        return None
+    cached = dict(cached)
+    cached["stale"] = age > CLAUDE_FRESH_TTL
+    cached["source"] = cached.get("source") or "claude-cache"
+    # Never re-surface accidental credential fields if an old cache had them.
+    for key in ("access_token", "refresh_token", "email", "email_address", "full_name"):
+        cached.pop(key, None)
+    return cached
+
+
 def claude_usage() -> dict[str, Any]:
     data = None
     source = None
@@ -148,34 +204,65 @@ def claude_usage() -> dict[str, Any]:
         if data:
             source = "claude-status"
             break
-    if not data:
-        return {"ok": False, "error": "no status file", "source": None}
 
-    rl = data.get("rate_limits") if isinstance(data.get("rate_limits"), dict) else {}
-    five = rl.get("five_hour") if isinstance(rl.get("five_hour"), dict) else {}
-    seven = rl.get("seven_day") if isinstance(rl.get("seven_day"), dict) else {}
-    now = _now()
-    five_reset = five.get("resets_at")
-    seven_reset = seven.get("resets_at")
-    five_pct = _pct(five.get("used_percentage"))
-    seven_pct = _pct(seven.get("used_percentage"))
-    if isinstance(five_reset, (int, float)) and five_reset < now:
-        five_pct = 0
-    if isinstance(seven_reset, (int, float)) and seven_reset < now:
-        seven_pct = 0
+    model = None
+    updated_at = None
+    five_pct = seven_pct = None
+    five_reset = seven_reset = None
 
-    return {
-        "ok": True,
-        "source": source,
-        "five_hour_pct": five_pct,
-        "seven_day_pct": seven_pct,
-        "five_hour_resets_at": five_reset,
-        "seven_day_resets_at": seven_reset,
-        "model": (data.get("model") or {}).get("display_name")
-        if isinstance(data.get("model"), dict)
-        else None,
-        "updated_at": data.get("_received_at") or data.get("updated_at"),
-    }
+    if data:
+        five, seven = _claude_rate_windows(data)
+        now = _now()
+        five_reset = five.get("resets_at")
+        seven_reset = seven.get("resets_at")
+        five_pct = _pct(five.get("used_percentage", five.get("used_percent", five.get("utilization"))))
+        seven_pct = _pct(seven.get("used_percentage", seven.get("used_percent", seven.get("utilization"))))
+        if isinstance(five_reset, (int, float)) and five_reset < now:
+            five_pct = 0
+        if isinstance(seven_reset, (int, float)) and seven_reset < now:
+            seven_pct = 0
+        if isinstance(data.get("model"), dict):
+            model = data["model"].get("display_name") or data["model"].get("id")
+        updated_at = data.get("_received_at") or data.get("updated_at")
+
+        if five_pct is not None or seven_pct is not None:
+            result = {
+                "ok": True,
+                "source": source,
+                "five_hour_pct": five_pct,
+                "seven_day_pct": seven_pct,
+                "five_hour_resets_at": five_reset,
+                "seven_day_resets_at": seven_reset,
+                "model": model,
+                "updated_at": updated_at,
+                "stale": False,
+                "_fetched_at": datetime.now(timezone.utc).isoformat(),
+                "_fetched_at_ts": now,
+            }
+            try:
+                _write_cache_json(CLAUDE_CACHE, result)
+            except OSError:
+                pass
+            return result
+
+    cached = _claude_from_cache()
+    if cached:
+        if model and not cached.get("model"):
+            cached = dict(cached)
+            cached["model"] = model
+        return cached
+
+    if data:
+        return {
+            "ok": False,
+            "error": "rate_limits_missing",
+            "source": source,
+            "model": model,
+            "updated_at": updated_at,
+            "five_hour_pct": None,
+            "seven_day_pct": None,
+        }
+    return {"ok": False, "error": "no status file", "source": None}
 
 
 def codex_usage() -> dict[str, Any]:
@@ -587,9 +674,8 @@ def _go_soft_pct(local: dict[str, Any]) -> int:
 
 
 def host_metrics() -> dict[str, Any]:
-    cpu = _cpu_pct()
-    mem = _mem_info()
-    return {"cpu_pct": cpu, **mem}
+    # _mem_info already folds CPU into pressure_pct and returns cpu_pct.
+    return _mem_info()
 
 
 def _cpu_pct() -> int:
@@ -684,17 +770,32 @@ def _mem_info() -> dict[str, Any]:
 
     if pressure >= 4:
         p_label = "critical 🔴"
+        level_score = 92
     elif pressure >= 2:
         p_label = "warning 🟡"
+        level_score = 62
     else:
         p_label = "normal 🟢"
+        level_score = 12
+
+    cpu = _cpu_pct()
+    # Single host-load index for MenuBar (hardware pressure, not AI quota weather).
+    pressure_pct = int(round(0.45 * used_pct + 0.25 * cpu + 0.30 * level_score))
+    if swap_mb >= 2048:
+        pressure_pct = min(100, pressure_pct + 8)
+    elif swap_mb >= 512:
+        pressure_pct = min(100, pressure_pct + 4)
+    pressure_pct = max(0, min(100, pressure_pct))
 
     return {
+        "cpu_pct": cpu,
         "mem_pct": used_pct,
         "mem_used_gb": round(used_gb, 1),
         "mem_total_gb": round(total_gb, 0),
         "swap_mb": round(swap_mb, 1),
         "pressure": p_label,
+        "pressure_level": pressure,
+        "pressure_pct": pressure_pct,
     }
 
 
@@ -702,32 +803,71 @@ def _remaining(deadline: float, maximum: float) -> float:
     return max(0.05, min(maximum, deadline - time.monotonic()))
 
 
-def _verified_agy_pids(deadline: float) -> list[str]:
-    """Return a bounded list of same-user processes whose exact command is agy."""
+def _agy_process_allowed(comm: str, args: str = "") -> bool:
+    """Accept only same-product Antigravity / agy process names or path markers."""
+    name = Path(comm).name
+    if name in AGY_COMM_NAMES:
+        return True
+    hay = f"{comm} {args}"
+    return any(marker in hay for marker in AGY_PATH_MARKERS)
+
+
+def _pgrep_pids(args: list[str], deadline: float) -> list[str]:
     try:
-        pids = subprocess.check_output(
-            ["/usr/bin/pgrep", "-x", "agy"],
+        return subprocess.check_output(
+            args,
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=_remaining(deadline, 1.0),
-        ).split()[:AGY_MAX_PORTS]
+        ).split()[: AGY_MAX_PORTS * 3]
     except (OSError, subprocess.SubprocessError):
         return []
 
-    verified: list[str] = []
-    for pid in pids:
+
+def _verified_agy_pids(deadline: float) -> list[str]:
+    """Return a bounded list of same-user Antigravity / agy processes.
+
+    Accepts CLI ``agy``, ``agy-node``, and the desktop app binary path so the
+    local language server can be found more reliably than ``pgrep -x agy`` alone.
+    """
+    candidates: list[str] = []
+    for cmd in (
+        ["/usr/bin/pgrep", "-x", "agy"],
+        ["/usr/bin/pgrep", "-x", "agy-node"],
+        ["/usr/bin/pgrep", "-x", "Antigravity"],
+        # Path-based fallback (still re-verified via ps uid + path markers).
+        ["/usr/bin/pgrep", "-f", "Antigravity|agy-node|/bin/agy"],
+    ):
         if time.monotonic() >= deadline:
+            break
+        for pid in _pgrep_pids(cmd, deadline):
+            if pid not in candidates:
+                candidates.append(pid)
+
+    verified: list[str] = []
+    for pid in candidates:
+        if time.monotonic() >= deadline:
+            break
+        if len(verified) >= AGY_MAX_PORTS:
             break
         try:
             output = subprocess.check_output(
-                ["/bin/ps", "-p", pid, "-o", "uid=", "-o", "comm="],
+                ["/bin/ps", "-p", pid, "-o", "uid=", "-o", "comm=", "-o", "args="],
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=_remaining(deadline, 0.6),
             ).strip()
-            uid_text, command = output.split(maxsplit=1)
-            if int(uid_text) == os.getuid() and Path(command).name == "agy":
-                verified.append(pid)
+            # uid is first token; comm may contain spaces rarely — use ps fields carefully.
+            parts = output.split(None, 2)
+            if len(parts) < 2:
+                continue
+            uid_text, comm = parts[0], parts[1]
+            args = parts[2] if len(parts) > 2 else ""
+            if int(uid_text) != os.getuid():
+                continue
+            if not _agy_process_allowed(comm, args):
+                continue
+            verified.append(pid)
         except (OSError, ValueError, subprocess.SubprocessError):
             continue
     return verified
@@ -757,17 +897,46 @@ def _find_agy_listen_ports(deadline: float) -> list[int]:
         except (OSError, subprocess.SubprocessError):
             continue
         for line in output.splitlines():
-            if "127.0.0.1:" not in line or "LISTEN" not in line:
+            # Accept 127.0.0.1 and [::1] — Antigravity sometimes binds IPv6 loopback.
+            host_port = None
+            if "127.0.0.1:" in line and "LISTEN" in line:
+                try:
+                    host_port = int(line.split("127.0.0.1:", 1)[1].split()[0].split("->", 1)[0])
+                except (ValueError, IndexError):
+                    host_port = None
+            elif "[::1]:" in line and "LISTEN" in line:
+                try:
+                    host_port = int(line.split("[::1]:", 1)[1].split()[0].split("->", 1)[0])
+                except (ValueError, IndexError):
+                    host_port = None
+            if host_port is None:
                 continue
-            try:
-                port = int(line.split("127.0.0.1:", 1)[1].split()[0].split("->", 1)[0])
-            except (ValueError, IndexError):
-                continue
-            if 1024 <= port <= 65535 and port not in ports:
-                ports.append(port)
+            if 1024 <= host_port <= 65535 and host_port not in ports:
+                ports.append(host_port)
                 if len(ports) >= AGY_MAX_PORTS:
                     return ports
     return ports
+
+
+def _agy_from_cache(max_age: float = AGY_STALE_TTL) -> dict[str, Any] | None:
+    """Return last-known-good Antigravity snapshot within max_age, or None."""
+    if not AGY_CACHE.exists():
+        return None
+    try:
+        cached = json.loads(AGY_CACHE.read_text(encoding="utf-8"))
+        if not isinstance(cached, dict) or cached.get("ok") is not True:
+            return None
+        age = _now() - float(cached.get("_fetched_at_ts", 0))
+        if age < 0 or age > max_age:
+            return None
+        out = dict(cached)
+        out["stale"] = age > AGY_TTL
+        out["source"] = out.get("source") or "agy-cache"
+        if out["stale"]:
+            out["source"] = "agy-cache-stale"
+        return out
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
 def _reject_json_constant(value: str) -> None:
@@ -817,27 +986,33 @@ def _probe_agy_user_status(port: int, deadline: float) -> dict[str, Any] | None:
 def antigravity_usage(force: bool = False) -> dict[str, Any]:
     """Antigravity CLI subscription quota via local language server GetUserStatus.
 
-    Requires a running `agy` session (CLI keeps LS on 127.0.0.1).
+    Requires a running `agy` / Antigravity language-server session on loopback.
     Remote cloudcode-pa quota APIs are often PERMISSION_DENIED for CLI accounts;
     local probe is the supported path (same approach as CodexBar).
+
+    When the process briefly exits (common), keep last-known-good values for
+    AGY_STALE_TTL so the MenuBar does not flap to A—%%.
     """
-    if not force and AGY_CACHE.exists():
-        try:
-            cached = json.loads(AGY_CACHE.read_text(encoding="utf-8"))
-            if _now() - float(cached.get("_fetched_at_ts", 0)) < AGY_TTL:
-                return cached
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            pass
+    if not force:
+        fresh = _agy_from_cache(max_age=AGY_TTL)
+        if fresh is not None:
+            return fresh
 
     deadline = time.monotonic() + AGY_TOTAL_DEADLINE
     ports = _find_agy_listen_ports(deadline)
     if not ports:
-        result = {
+        stale = _agy_from_cache(max_age=AGY_STALE_TTL)
+        if stale is not None:
+            stale = dict(stale)
+            stale["stale"] = True
+            stale["source"] = "agy-cache-stale"
+            stale["error"] = "agy_not_running_using_cache"
+            return stale
+        return {
             "ok": False,
             "error": "agy 未執行 — 開 Antigravity CLI 後會顯示用量",
             "hint": "local language server (GetUserStatus) only while agy is running",
         }
-        return result
 
     body = None
     for port in ports:
@@ -848,6 +1023,13 @@ def antigravity_usage(force: bool = False) -> dict[str, Any]:
             break
 
     if not body:
+        stale = _agy_from_cache(max_age=AGY_STALE_TTL)
+        if stale is not None:
+            stale = dict(stale)
+            stale["stale"] = True
+            stale["source"] = "agy-cache-stale"
+            stale["error"] = "agy_status_unavailable_using_cache"
+            return stale
         return {
             "ok": False,
             "error": "agy_status_unavailable",
@@ -973,21 +1155,32 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    # Compact title pieces for MenuBar
+    # Compact title pieces for MenuBar / logs
     cl = claude.get("five_hour_pct") if claude.get("ok") else None
     cx = codex.get("five_hour_pct") if codex.get("ok") else None
     go_pct = go.get("used_pct") if go.get("ok") else None
     gk = grok.get("used_pct") if grok.get("ok") else None
     ag = agy.get("used_pct") if agy.get("ok") else None
     mem = host.get("mem_pct")
+    host_load = host.get("pressure_pct")
+    if host_load is None and isinstance(mem, (int, float)):
+        cpu = host.get("cpu_pct") or 0
+        host_load = int(round(0.55 * float(mem) + 0.45 * float(cpu)))
 
-    def fmt(label: str, v: Any) -> str:
-        return f"{label}{v}" if v is not None else f"{label}—"
+    def chip(letter: str, v: Any, bang_at: int | None = None) -> str:
+        if v is None:
+            return f"{letter}—%"
+        mark = "!" if bang_at is not None and float(v) >= bang_at else ""
+        return f"{letter}{mark}{int(v)}%"
 
-    # MenuBar: C=Claude G=Codex K=Grok A=Antigravity  (+ M%% when swap/RAM hot)
-    def chip(letter: str, v: Any) -> str:
-        return f"{letter}{v}%" if v is not None else f"{letter}—%"
-
+    # C/G = AI 5h quota; H = computer pressure index (not AI weather score)
+    title = " ".join(
+        [
+            chip("C", cl),
+            chip("G", cx),
+            chip("H", host_load, bang_at=80),
+        ]
+    )
     title_full = " ".join(
         [
             chip("C", cl),
@@ -995,16 +1188,10 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
             chip("Go", go_pct),
             chip("K", gk),
             chip("A", ag),
+            chip("H", host_load, bang_at=80),
             chip("M", mem),
         ]
     )
-    title_parts = [chip("C", cl), chip("G", cx), chip("K", gk)]
-    if agy.get("ok"):
-        title_parts.append(chip("A", ag))
-    swap_mb = float(host.get("swap_mb") or 0)
-    if swap_mb >= 64 or (mem is not None and mem >= 80):
-        title_parts.append(chip("M", mem))
-    title = " ".join(title_parts).upper()
 
     generated_at = datetime.now(timezone.utc).isoformat()
     return {
