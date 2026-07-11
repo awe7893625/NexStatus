@@ -740,24 +740,25 @@ local function ledgerOverviewHTML(s)
   local fixedNote = totals.fixed_verified and "已驗月費" or "待帳單確認"
   local totalTokens = (tonumber(totals.input_tokens) or 0) + (tonumber(totals.output_tokens) or 0)
 
-  local machines = {}
-  for _, item in ipairs(ledger.machines or {}) do
-    if type(item) == "table" then machines[tostring(item.id or "unknown")] = item end
-  end
   local machineRows = ""
-  local machineLabels = { m5 = "M5 主腦", m4 = "M4 控制面", unknown = "未歸屬" }
-  for _, key in ipairs({ "m5", "m4", "unknown" }) do
-    local item = machines[key] or {}
-    local events = tonumber(item.events) or 0
-    local evidence = events > 0
-        and string.format("%s tokens · %d events", compactNumber(item.tokens), events)
-      or "無本月證據"
-    machineRows = machineRows .. string.format([[
+  local machineLabels = { unknown = "Unassigned" }
+  for _, item in ipairs(ledger.machines or {}) do
+    if type(item) == "table" then
+      local key = tostring(item.id or "unknown")
+      local events = tonumber(item.events) or 0
+      local evidence = events > 0
+          and string.format("%s tokens · %d events", compactNumber(item.tokens), events)
+        or "No events this month"
+      machineRows = machineRows .. string.format([[
       <div class="machine-row">
         <span class="machine-name">%s</span>
         <span class="machine-evidence%s">%s</span>
       </div>
-    ]], esc(machineLabels[key]), events == 0 and " is-empty" or "", esc(evidence))
+    ]], esc(machineLabels[key] or key), events == 0 and " is-empty" or "", esc(evidence))
+    end
+  end
+  if machineRows == "" then
+    machineRows = [[<div class="machine-row"><span class="machine-name">—</span><span class="machine-evidence is-empty">No machine tags</span></div>]]
   end
 
   local sourceRows = ""
@@ -865,7 +866,7 @@ local function ledgerDetailHTML(s)
     ["local-ollama"] = "Ollama 本地算力",
     ["local-mlx"] = "MLX 本地算力",
   }
-  local machineLabels = { m5 = "M5 主腦", m4 = "M4 控制面", unknown = "未歸屬" }
+  local machineLabels = { unknown = "Unassigned" }
   local classLabels = {
     subscription = "訂閱制", free_cloud = "免費雲端", local_compute = "本地算力",
     metered_paid = "按量付費", unknown = "未知來源",

@@ -233,7 +233,8 @@ def collect_ledger_summary(
             return _error_contract("incompatible", "cost_events_missing", timezone_name)
 
         class_buckets = {name: _empty_bucket(name) for name in CLASS_ORDER}
-        machine_buckets = {name: _empty_bucket(name) for name in ("m5", "m4", "unknown")}
+        # Any machine tag from the user's ledger (sanitized); no host-specific product names.
+        machine_buckets: dict[str, dict[str, Any]] = {"unknown": _empty_bucket("unknown")}
         source_buckets: dict[str, dict[str, Any]] = {}
         project_buckets: dict[str, dict[str, Any]] = {}
         window_buckets: dict[str, dict[str, Any]] = {
@@ -349,9 +350,12 @@ def collect_ledger_summary(
                 unknown_quota_events += 1
 
             raw_machine = str(row["machine"] or "").strip().lower()
-            machine_id = raw_machine if raw_machine in {"m4", "m5"} else "unknown"
+            cleaned_machine = "".join(ch for ch in raw_machine if ch.isalnum() or ch in "._-")[:32]
+            machine_id = cleaned_machine or "unknown"
             if machine_id == "unknown":
                 missing_machine_events += 1
+            if machine_id not in machine_buckets:
+                machine_buckets[machine_id] = _empty_bucket(machine_id)
 
             source = source_buckets.setdefault(quota_source, _empty_bucket(quota_source))
             source["class"] = cost_class
@@ -506,7 +510,10 @@ def collect_ledger_summary(
                 "events": event_count,
             },
             "classes": [class_buckets[name] for name in CLASS_ORDER],
-            "machines": [machine_buckets[name] for name in ("m5", "m4", "unknown")],
+            "machines": sorted(
+                machine_buckets.values(),
+                key=lambda item: (0 if item["id"] != "unknown" else 1, -item["tokens"], item["id"]),
+            ),
             "sources": _sorted_buckets(source_buckets.values()),
             "projects": _sorted_buckets(project_buckets.values()),
             "windows": windows,

@@ -1,52 +1,36 @@
-# NexStatus Cost Ledger v1 Rollback Plan
+# Rollback Plan
 
-## Baseline
+## Scope
 
-- Branch: `feat/nexstatus-cost-ledger-v3`
-- Preserved pre-delivery checkpoint: `2cffe04`
-- Project contract checkpoint: `467dd85`
-- No push, release, live Hammerspoon install, signing, notarization, or GitHub Pages deployment is authorized by this plan.
+Safe rollback for ledger / panel / installer changes without touching user secrets or rewriting git history on a public branch.
 
 ## Commit boundaries
 
-Keep implementation in reversible commits:
+Prefer small reversible commits:
 
-1. Ledger query core and its unit tests.
-2. Collector integration and cache/privacy hardening.
-3. Installer escaping/permission hardening and tests.
-4. Hammerspoon information architecture and visual changes.
-5. Acceptance/security-only test adjustments.
-
-Do not squash these boundaries before acceptance.
+1. Ledger query core + unit tests
+2. Collector integration + cache/privacy hardening
+3. Installer escaping/permission hardening + tests
+4. Hammerspoon UI changes
+5. Docs and acceptance notes
 
 ## Rollback order
 
-1. Revert the UI commit first. Existing snapshots and provider cards must remain usable.
-2. Revert collector integration next. The existing provider collectors must continue to produce the legacy snapshot.
-3. Revert ledger core last. It is read-only and must not leave migrations or database state behind.
-4. Revert installer changes independently if live-install behavior regresses.
+1. Revert UI first — provider cards must still open.
+2. Revert collector integration next — Claude/Codex/Grok/host must still snapshot.
+3. Revert ledger core last — it is read-only and must not leave DB migrations behind.
+4. Revert installer changes independently if install regresses.
 
-Use ordinary `git revert <commit>`. Do not use destructive reset, force-push, history rewriting, or broad checkout commands.
+Use `git revert <commit>`. Avoid force-push on shared public branches unless maintainers explicitly agree.
 
 ## Runtime rollback
 
-- The panel must tolerate snapshots with no `ledger` section.
-- The collector must tolerate a missing ledger module/feature flag and keep existing providers alive.
-- Keep the old snapshot path and prefs schema during the first increment.
-- If a new panel fails, disable the ledger/summary presentation without modifying `cost.db`.
-- If an install test touched an isolated Hammerspoon config, remove only the delimited NexStatus load block and its symlink.
+- Panel tolerates snapshots with no `ledger` section.
+- Collector tolerates a missing ledger module and keeps other providers alive.
+- If the new panel fails, hide the ledger presentation without writing to the ledger database.
+- Installer rollback removes only the delimited NexStatus load block and its symlink.
 
 ## Data safety
 
-The first increment performs no schema migration and no write to `cost.db`. A rollback therefore never edits, restores, or replaces the canonical ledger. Cache/snapshot files are disposable derived data; delete them only after confirming they are under the isolated NexStatus cache directory.
-
-## Rollback evidence
-
-For each rollback drill record:
-
-- commit reverted;
-- command and exit status;
-- collector smoke result;
-- legacy snapshot compatibility result;
-- Git status;
-- any remaining files or manual action.
+- No schema migration or write path against the user’s ledger DB.
+- Cache/snapshot files under the NexStatus cache directory are disposable derived data.

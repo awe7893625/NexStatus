@@ -41,7 +41,7 @@ This plan covers the first production increment: a read-only canonical-ledger su
 
 Render at least these synthetic snapshots:
 
-1. Normal ledger with M4 and M5 rows.
+1. Normal ledger with two labelled machine rows and one unknown machine.
 2. Missing ledger.
 3. Stale ledger with unknown quota and missing machine.
 4. Fixed commitment not verified.

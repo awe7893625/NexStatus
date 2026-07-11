@@ -947,8 +947,13 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — ledger must never abort the snapshot
         ledger = {"ok": False, "status": "error", "quality": {"warnings": ["ledger_unavailable"]}}
 
-    # Keep last live ledger if this poll failed (avoid flashing 「格式待升級」).
-    if not ledger.get("ok") and OUT.is_file():
+    # Keep last live ledger only on transient read failures (busy/error), never when
+    # the DB is simply missing — users without a ledger must see a clean empty state.
+    if (
+        not ledger.get("ok")
+        and ledger.get("status") in {"busy", "error", "incompatible"}
+        and OUT.is_file()
+    ):
         try:
             previous = json.loads(OUT.read_text(encoding="utf-8"))
             prev_ledger = previous.get("ledger") if isinstance(previous, dict) else None
@@ -957,8 +962,7 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
                 quality = dict(carried.get("quality") or {})
                 warnings = list(quality.get("warnings") or [])
                 warnings.append("ledger_stale_carry")
-                if ledger.get("status"):
-                    warnings.append(f"ledger_poll_{ledger.get('status')}")
+                warnings.append(f"ledger_poll_{ledger.get('status')}")
                 quality["warnings"] = list(dict.fromkeys(warnings))
                 quality["stale"] = True
                 if quality.get("level") == "ok":

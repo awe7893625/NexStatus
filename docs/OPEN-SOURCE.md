@@ -1,33 +1,36 @@
 # Open-sourcing NexStatus
 
+NexStatus is a **local, client-side** macOS MenuBar app. Contributors and users run it on their own machines and connect their own Claude / Codex / OpenCode / Grok accounts. Nothing is uploaded by NexStatus.
+
 ## Suggested GitHub setup
 
-1. Create a **public** repo named `NexStatus` (or `nexstatus`).
-2. Do **not** force-push secrets. Run a quick scan:
+1. Create a public repo (or use the existing one).
+2. Scan before every push:
 
 ```bash
-rg -n 'sk-|api[_-]?key|Bearer |eyJ' --glob '!**/.git/**' .
+rg -n 'sk-|api[_-]?key|Bearer |eyJ|/Users/[a-zA-Z]' --glob '!**/.git/**' .
+python3 -m unittest discover -s tests -v
 ```
 
-3. Push:
+3. Push only product sources (`nexstatus/`, `hammerspoon/`, `scripts/`, `docs/`, tests, README). Never push local cache, auth files, or internal work packets.
 
-```bash
-cd /path/to/NexStatus
-git init
-git add .
-git commit -m "Initial release: NexStatus MenuBar for AI usage + host metrics"
-git branch -M main
-git remote add origin git@github.com:awe7893625/NexStatus.git
-git push -u origin main
-```
+## What users connect themselves
 
-Public repo (live): **https://github.com/awe7893625/NexStatus**  
-GitHub Pages (live): **https://awe7893625.github.io/NexStatus/**
+| Source | Typical local input (examples) |
+|--------|--------------------------------|
+| Claude | `~/.claude/usage-status.json` |
+| Codex | `~/.codex/sessions/**/*.jsonl` |
+| Grok | `~/.grok/auth.json` (token used in-memory only) |
+| OpenCode Go | `~/.local/share/opencode/auth.json` |
+| Optional ledger | `NEXSTATUS_COST_DB` or `~/.claude/state/cost.db` |
 
-Topics: `macos`, `menubar`, `hammerspoon`, `claude`, `codex`, `grok`, `opencode`, `status`.
+None of these files belong in git. Each user supplies their own.
 
-## What stays private on the author’s machine
+## What must stay out of the public tree
 
-Rain’s personal paths (`~/Developer/M5Load`, Hammerspoon NexVoice, cost.db ledgers) are **not** required for NexStatus. The open repo is self-contained under `NexStatus/`.
+- API keys, OAuth tokens, cookies, `auth.json`
+- Live `status.json` / billing dumps from a real machine
+- Internal orchestration folders (e.g. `.workflow/`)
+- Absolute home-directory paths to private projects
 
-Legacy experiments may remain in `~/Developer/M5Load` but are not part of the OSS tree.
+See [SECURITY.md](SECURITY.md) for runtime guarantees.
