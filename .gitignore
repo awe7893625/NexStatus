@@ -30,3 +30,11 @@ build/
 .idea/
 .vscode/
 *.swp
+# Internal orchestration / private work packets (never publish)
+.workflow/
+.worktrees/
+# Runtime cache / snapshots (owner machine only)
+**/status.json
+**/panel-debug.html
+nexstatus/**/__pycache__/
+hammerspoon/**/*.bak*

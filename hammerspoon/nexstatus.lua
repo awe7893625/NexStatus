@@ -4,9 +4,13 @@
 
 local M = {}
 
-local item = nil
+local item = _G.NexStatusMenuBar
 local timer = nil
 local panel = nil
+local redrawPanel = nil
+local collectorTask = nil
+local collectorWatchdog = nil
+local refreshQueued = false
 
 local HOME = os.getenv("HOME") or ""
 local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Developer/NexStatus")
@@ -14,8 +18,8 @@ local SNAP = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. 
 local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatus")) .. "/prefs.json"
 local PY = ROOT .. "/nexstatus/collector.py"
 local PYTHON = "/usr/bin/python3"
-local PANEL_W = 380
-local PANEL_H = 820
+local PANEL_W = 420
+local PANEL_H = 860
 
 -- Chart: bar | circle
 -- Theme: glass | paper | mono | nord | aurora (creative)
@@ -23,6 +27,13 @@ local PANEL_H = 820
 local CHART_ORDER = { "bar", "circle" }
 local THEME_ORDER = { "glass", "paper", "mono", "nord", "aurora" }
 local GLASS_PRESET_ORDER = { "soft", "crystal", "dense", "smoke" }
+local SECTION_ORDER = { "compute", "radar", "loaders", "providers" }
+-- Per-grid tile orders (each card cell can be reordered independently).
+local TILE_ORDER_DEFAULTS = {
+  token_kpis = { "3d", "7d", "30d" },
+  token_sources = { "claude", "codex", "free", "local", "other" },
+  providers = { "claude", "codex", "go", "grok", "antigravity", "mac" },
+}
 
 local GLASS_PRESETS = {
   soft    = { name = "柔霧", opacity = 0.88, blur = 22, saturate = 130 },
@@ -115,7 +126,66 @@ local prefs = {
   blur = 48,
   saturate = 190,
   radar = true, -- creative Pressure Radar + Quota Weather
+  density = "comfortable",
+  edit_layout = false,
+  section_order = { "compute", "radar", "loaders", "providers" },
+  token_kpi_order = { "3d", "7d", "30d" },
+  token_source_order = { "claude", "codex", "free", "local", "other" },
+  provider_order = { "claude", "codex", "go", "grok", "antigravity", "mac" },
 }
+
+local function normalizedSectionOrder(value)
+  -- Compute Lens is the fixed primary section. Only secondary sections are
+  -- personalized, so an older preference file cannot demote free cloud data.
+  local result, seen = { "compute" }, { compute = true }
+  if type(value) == "table" then
+    for _, id in ipairs(value) do
+      if type(id) == "string" and not seen[id] then
+        for _, allowed in ipairs(SECTION_ORDER) do
+          if id == allowed then
+            table.insert(result, id)
+            seen[id] = true
+            break
+          end
+        end
+      end
+    end
+  end
+  for _, id in ipairs(SECTION_ORDER) do
+    if not seen[id] then table.insert(result, id) end
+  end
+  return result
+end
+
+local function normalizedTileOrder(group, value)
+  local allowed = TILE_ORDER_DEFAULTS[group]
+  if not allowed then return {} end
+  local result, seen = {}, {}
+  if type(value) == "table" then
+    for _, id in ipairs(value) do
+      if type(id) == "string" and not seen[id] then
+        for _, candidate in ipairs(allowed) do
+          if id == candidate then
+            table.insert(result, id)
+            seen[id] = true
+            break
+          end
+        end
+      end
+    end
+  end
+  for _, id in ipairs(allowed) do
+    if not seen[id] then table.insert(result, id) end
+  end
+  return result
+end
+
+local function tilePrefsKey(group)
+  if group == "token_kpis" then return "token_kpi_order" end
+  if group == "token_sources" then return "token_source_order" end
+  if group == "providers" then return "provider_order" end
+  return nil
+end
 
 local function clamp(n, lo, hi)
   n = tonumber(n)
@@ -154,6 +224,14 @@ local function loadPrefs()
   if data.chart == "bar" or data.chart == "circle" then prefs.chart = data.chart end
   if THEMES[data.theme] then prefs.theme = data.theme end
   if data.radar == false then prefs.radar = false else prefs.radar = true end
+  if data.density == "compact" or data.density == "comfortable" then
+    prefs.density = data.density
+  end
+  prefs.edit_layout = data.edit_layout == true
+  prefs.section_order = normalizedSectionOrder(data.section_order)
+  prefs.token_kpi_order = normalizedTileOrder("token_kpis", data.token_kpi_order)
+  prefs.token_source_order = normalizedTileOrder("token_sources", data.token_source_order)
+  prefs.provider_order = normalizedTileOrder("providers", data.provider_order)
   if type(data.glass_preset) == "string" and (GLASS_PRESETS[data.glass_preset] or data.glass_preset == "custom") then
     prefs.glass_preset = data.glass_preset
   end
@@ -169,9 +247,10 @@ end
 local function savePrefs()
   local dir = PREFS_PATH:match("(.+)/[^/]+$")
   if dir then
-    os.execute(string.format("mkdir -p %q", dir))
+    os.execute(string.format("mkdir -p %q && chmod 700 %q", dir, dir))
   end
-  local f = io.open(PREFS_PATH, "w")
+  local tempPath = PREFS_PATH .. ".tmp"
+  local f = io.open(tempPath, "w")
   if not f then return end
   f:write(hs.json.encode({
     chart = prefs.chart,
@@ -181,8 +260,16 @@ local function savePrefs()
     blur = prefs.blur,
     saturate = prefs.saturate,
     radar = prefs.radar,
+    density = prefs.density,
+    edit_layout = prefs.edit_layout,
+    section_order = normalizedSectionOrder(prefs.section_order),
+    token_kpi_order = normalizedTileOrder("token_kpis", prefs.token_kpi_order),
+    token_source_order = normalizedTileOrder("token_sources", prefs.token_source_order),
+    provider_order = normalizedTileOrder("providers", prefs.provider_order),
   }))
   f:close()
+  os.execute(string.format("chmod 600 %q", tempPath))
+  os.rename(tempPath, PREFS_PATH)
 end
 
 local function cycleList(list, cur)
@@ -208,14 +295,6 @@ end
 
 loadPrefs()
 
-local function shell(cmd)
-  local output, status = hs.execute(cmd, true)
-  if status then
-    return (output or ""):gsub("%s+$", "")
-  end
-  return ""
-end
-
 local function readSnapshot()
   local f = io.open(SNAP, "r")
   if not f then return nil end
@@ -228,8 +307,45 @@ local function readSnapshot()
 end
 
 local function refreshSnapshot(forceRemote)
-  local flag = forceRemote and " --force" or ""
-  shell(string.format("%s %q%s 2>/dev/null", PYTHON, PY, flag))
+  if collectorTask then
+    refreshQueued = refreshQueued or forceRemote
+    return false
+  end
+
+  local args = { PY }
+  if forceRemote then table.insert(args, "--force") end
+
+  collectorTask = hs.task.new(PYTHON, function(exitCode, _stdout, _stderr)
+    if collectorWatchdog then
+      collectorWatchdog:stop()
+      collectorWatchdog = nil
+    end
+    collectorTask = nil
+
+    -- Only publish a completed atomic snapshot. A failed/timed-out collector
+    -- leaves the last known-good dashboard intact.
+    if exitCode == 0 then
+      if M.refreshTitleOnly then M.refreshTitleOnly() end
+      if redrawPanel then redrawPanel() end
+    end
+
+    if refreshQueued then
+      local queuedForce = refreshQueued
+      refreshQueued = false
+      hs.timer.doAfter(0, function() refreshSnapshot(queuedForce) end)
+    end
+  end, args)
+
+  if not collectorTask then return false end
+  collectorTask:start()
+
+  local activeTask = collectorTask
+  collectorWatchdog = hs.timer.doAfter(8, function()
+    if collectorTask == activeTask and activeTask:isRunning() then
+      activeTask:terminate()
+    end
+  end)
+  return true
 end
 
 local function pct(v)
@@ -308,8 +424,115 @@ local function meterCircle(label, p, col, big)
   ]], cls, col, w, col, val, esc(label))
 end
 
+local PROVIDER_META = {
+  claude = { label = "Claude", accent = "#D97757" },
+  codex = { label = "Codex", accent = "#10A37F" },
+  go = { label = "OpenCode Go", accent = "#FF9F0A" },
+  grok = { label = "Grok", accent = "#BF5AF2" },
+  antigravity = { label = "Antigravity", accent = "#4285F4" },
+  mac = { label = "Mac", accent = "#0A84FF" },
+}
+local TOKEN_SOURCE_META = {
+  claude = { label = "Claude", accent = "#D97757" },
+  codex = { label = "Codex", accent = "#10A37F" },
+  free = { label = "免費雲端", accent = "#30D158" },
+  ["local"] = { label = "本地算力", accent = "#64D2FF" },
+  other = { label = "其他", accent = "#8E8E93" },
+}
+local TOKEN_KPI_META = {
+  ["3d"] = { label = "近 3 日", accent = "#0A84FF" },
+  ["7d"] = { label = "近 7 日", accent = "#0A84FF" },
+  ["30d"] = { label = "近 30 日", accent = "#0A84FF" },
+}
+local SECTION_META = {
+  compute = { label = "算力與 Token", fixed = true },
+  radar = { label = "壓力雷達" },
+  loaders = { label = "額度圓環" },
+  providers = { label = "服務與主機" },
+}
+
+-- Apple Settings–style reorder control (line.horizontal.3)
+local SORT_GRIP_SVG = [[<svg class="sort-grip-icon" viewBox="0 0 22 14" width="22" height="14" aria-hidden="true"><path fill="currentColor" d="M1 1.5h20a1 1 0 0 1 0 2H1a1 1 0 1 1 0-2zm0 5h20a1 1 0 0 1 0 2H1a1 1 0 1 1 0-2zm0 5h20a1 1 0 0 1 0 2H1a1 1 0 1 1 0-2z"/></svg>]]
+
+local function sortRowHTML(group, id, label, accent, fixed)
+  if fixed then
+    return string.format([[
+      <div class="sort-row is-fixed" data-sort-group="%s" data-sort-id="%s" role="listitem">
+        <span class="sort-leading"><span class="sort-dot" style="background:%s"></span></span>
+        <span class="sort-label">%s</span>
+        <span class="sort-trailing sort-fixed-label">固定</span>
+      </div>
+    ]], esc(group), esc(id), accent or "#8E8E93", esc(label))
+  end
+  return string.format([[
+    <div class="sort-row" data-sort-group="%s" data-sort-id="%s" role="listitem">
+      <span class="sort-leading"><span class="sort-dot" style="background:%s"></span></span>
+      <span class="sort-label">%s</span>
+      <button type="button" class="sort-grip" data-sort-grip="true" aria-label="重新排序 %s">%s</button>
+    </div>
+  ]], esc(group), esc(id), accent or "#8E8E93", esc(label), esc(label), SORT_GRIP_SVG)
+end
+
+local function sortListHTML(group, order, meta)
+  local rows = ""
+  for _, id in ipairs(order) do
+    local m = meta[id] or { label = id, accent = "#8E8E93" }
+    rows = rows .. sortRowHTML(group, id, m.label, m.accent, m.fixed == true)
+  end
+  return string.format(
+    '<div class="sort-list" data-sort-list="%s" role="list">%s</div>',
+    esc(group), rows
+  )
+end
+
+local function sortSectionHTML(title, footer, listHtml)
+  return string.format([[
+    <section class="sort-section">
+      <h3 class="sort-section-title">%s</h3>
+      %s
+      %s
+    </section>
+  ]], esc(title), listHtml,
+    footer and ('<p class="sort-section-footer">' .. esc(footer) .. "</p>") or "")
+end
+
+local function layoutReorderSheetHTML()
+  local sectionOrder = normalizedSectionOrder(prefs.section_order)
+  local providerOrder = normalizedTileOrder("providers", prefs.provider_order)
+  local sourceOrder = normalizedTileOrder("token_sources", prefs.token_source_order)
+  local kpiOrder = normalizedTileOrder("token_kpis", prefs.token_kpi_order)
+  -- Mirrors iOS Settings edit/reorder: nav bar + Done, inset grouped lists,
+  -- right-edge drag control only (HIG Lists and tables).
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="layout" aria-hidden="true"></div>
+    <section class="detail-sheet layout-sheet" id="layout-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="layout-sheet-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="layout-nav" role="navigation">
+        <button type="button" class="layout-nav-btn layout-nav-cancel" data-action="layout-done" aria-label="取消">取消</button>
+        <h2 id="layout-sheet-title" class="layout-nav-title">編輯排序</h2>
+        <button type="button" class="layout-nav-btn layout-nav-done" data-action="layout-done" aria-label="完成">完成</button>
+      </header>
+      <div class="sheet-scroll layout-scroll">
+        %s
+        %s
+        %s
+        %s
+        <button type="button" class="layout-reset" data-action="reset-layout">還原預設排序</button>
+      </div>
+    </section>
+  ]],
+    sortSectionHTML("服務卡片", "按住右側控制項拖移，調整 Claude、Codex 等卡片順序。",
+      sortListHTML("providers", providerOrder, PROVIDER_META)),
+    sortSectionHTML("Token 來源", nil, sortListHTML("token_sources", sourceOrder, TOKEN_SOURCE_META)),
+    sortSectionHTML("時間窗", nil, sortListHTML("token_kpis", kpiOrder, TOKEN_KPI_META)),
+    sortSectionHTML("儀表板區塊", "「算力與 Token」固定在最上方。",
+      sortListHTML("sections", sectionOrder, SECTION_META))
+  )
+end
+
 local function rowHTML(opts)
-  -- opts: name, badge, main, sub, bars = {{label, pct}, ...}
+  -- opts: id, name, badge, main, sub, bars = {{label, pct}, ...}
   -- In circle mode, cards stay compact (text only); hero rings are rendered separately.
   local chart = prefs.chart or "bar"
   local meters = ""
@@ -321,7 +544,7 @@ local function rowHTML(opts)
   end
 
   return string.format([[
-    <section class="card">
+    <article class="card">
       <header class="card-head">
         <div class="id">
           <span class="dot" style="background:%s"></span>
@@ -332,7 +555,7 @@ local function rowHTML(opts)
       </header>
       <div class="sub">%s</div>
       %s
-    </section>
+    </article>
   ]],
     opts.accent or "#0A84FF",
     esc(opts.name),
@@ -387,11 +610,13 @@ local function pressureFromSnapshot(s)
       table.insert(parts, { key = key, label = label, pct = p })
     end
   end
+  local ag = s.antigravity or {}
   add("C", "Claude", cl.ok, cl.five_hour_pct)
   add("G", "Codex", cx.ok, cx.five_hour_pct)
   add("O", "OpenCode", go.ok or go.live_status == "capped",
     go.live_status == "capped" and 100 or go.used_pct)
   add("K", "Grok", gk.ok, gk.used_pct)
+  add("A", "Antigravity", ag.ok, ag.used_pct or ag.session_used_pct)
   local mem = pct(host.mem_pct)
   local swap = tonumber(host.swap_mb) or 0
   if mem and (swap >= 64 or mem >= 70) then
@@ -470,6 +695,617 @@ local function pressureRadarHTML(s)
   ]], col, pr.score, col, pr.score, esc(pr.weather), esc(pr.mood), esc(hot), chips)
 end
 
+local function compactNumber(v)
+  local n = tonumber(v)
+  if n == nil then return "—" end
+  if n >= 1000000000 then return string.format("%.1fB", n / 1000000000) end
+  if n >= 1000000 then return string.format("%.1fM", n / 1000000) end
+  if n >= 1000 then return string.format("%.1fK", n / 1000) end
+  return string.format("%.0f", n)
+end
+
+local function money(v)
+  local n = tonumber(v)
+  if n == nil then return "—" end
+  return string.format("$%.2f", n)
+end
+
+local function ledgerOverviewHTML(s)
+  local ledger = s.ledger or {}
+  if ledger.ok ~= true then
+    local status = tostring(ledger.status or "missing")
+    local labels = {
+      missing = "尚未找到成本帳本（cost.db）",
+      incompatible = "成本帳本讀取失敗，稍後自動重試",
+      busy = "成本帳本忙碌中，請稍候",
+      error = "成本帳本暫時不可用",
+    }
+    local detail = ""
+    local warnings = ((ledger.quality or {}).warnings or {})
+    if type(warnings) == "table" and warnings[1] then
+      detail = string.format('<div class="ledger-empty-detail">%s</div>', esc(tostring(warnings[1])))
+    end
+    return string.format([[
+      <section class="ledger-overview ledger-unavailable" aria-label="成本帳本狀態">
+        <div class="section-kicker">COST LEDGER · 更新中</div>
+        <div class="ledger-empty">%s</div>
+        %s
+        <button type="button" class="layout-reset" style="margin-top:12px;color:var(--blue)" data-action="refresh">重新整理帳本</button>
+      </section>
+    ]], esc(labels[status] or labels.error), detail)
+  end
+
+  local totals = ledger.totals or {}
+  local fixedValue = totals.fixed_verified and money(totals.fixed_commitment_usd) or "—"
+  local fixedNote = totals.fixed_verified and "已驗月費" or "待帳單確認"
+  local totalTokens = (tonumber(totals.input_tokens) or 0) + (tonumber(totals.output_tokens) or 0)
+
+  local machines = {}
+  for _, item in ipairs(ledger.machines or {}) do
+    if type(item) == "table" then machines[tostring(item.id or "unknown")] = item end
+  end
+  local machineRows = ""
+  local machineLabels = { m5 = "M5 主腦", m4 = "M4 控制面", unknown = "未歸屬" }
+  for _, key in ipairs({ "m5", "m4", "unknown" }) do
+    local item = machines[key] or {}
+    local events = tonumber(item.events) or 0
+    local evidence = events > 0
+        and string.format("%s tokens · %d events", compactNumber(item.tokens), events)
+      or "無本月證據"
+    machineRows = machineRows .. string.format([[
+      <div class="machine-row">
+        <span class="machine-name">%s</span>
+        <span class="machine-evidence%s">%s</span>
+      </div>
+    ]], esc(machineLabels[key]), events == 0 and " is-empty" or "", esc(evidence))
+  end
+
+  local sourceRows = ""
+  local classLabels = {
+    subscription = "訂閱",
+    free_cloud = "免費雲",
+    local_compute = "本地",
+    metered_paid = "按量付費",
+    unknown = "未知",
+  }
+  local sourceLabels = {
+    ["claude-code-oauth-quota"] = "Claude Code",
+    ["codex-plus-subscription"] = "Codex",
+    ["opencode-go-subscription"] = "OpenCode Go",
+    ["nim-free-quota"] = "NVIDIA NIM",
+    ["cerebras-free"] = "Cerebras",
+    ["local-ollama"] = "Ollama",
+    ["local-mlx"] = "MLX",
+  }
+  for i, item in ipairs(ledger.sources or {}) do
+    if i > 3 then break end
+    if type(item) == "table" then
+      local sourceId = tostring(item.id or "unknown")
+      sourceRows = sourceRows .. string.format([[
+        <div class="source-chip">
+          <span>%s</span><b>%s</b><small>%s</small>
+        </div>
+      ]], esc(sourceLabels[sourceId] or sourceId), esc(compactNumber(item.tokens)),
+        esc(classLabels[tostring(item.class or "unknown")] or "未知"))
+    end
+  end
+  if sourceRows == "" then sourceRows = '<div class="source-chip"><span>來源</span><b>—</b><small>無資料</small></div>' end
+
+  local warningLabels = {
+    fixed_subscription_missing = "七月固定月費尚未登錄",
+    fixed_subscription_unverified = "固定月費尚未驗帳",
+    fixed_subscription_table_missing = "固定月費資料表缺少",
+    fixed_allocation_unavailable = "月費分攤暫不可用",
+    naive_timestamps_assumed_local = "部分時間以台北本地時間解讀",
+    invalid_timestamps_skipped = "少量無效時間事件已略過",
+    unknown_quota_source = "存在未知額度來源",
+    machine_attribution_missing = "存在未歸屬機器事件",
+    ledger_stale = "帳本資料已過期",
+    period_has_no_events = "本月尚無事件",
+  }
+  local warnings = {}
+  for _, code in ipairs((ledger.quality or {}).warnings or {}) do
+    if #warnings >= 3 then break end
+    table.insert(warnings, warningLabels[tostring(code)] or "資料品質待確認")
+  end
+  local qualityHTML = ""
+  if #warnings > 0 then
+    qualityHTML = '<div class="quality-banner" role="status">' .. esc(table.concat(warnings, " · ")) .. '</div>'
+  end
+
+  return string.format([[
+    <section class="ledger-overview" aria-label="本月成本帳本總覽">
+      <div class="ledger-head">
+        <div><div class="section-kicker">COST LEDGER · %s</div><div class="ledger-title">本月成本與算力</div></div>
+        <div class="ledger-status"><span class="status-dot"></span>%s</div>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi"><span>按量實付</span><strong>%s</strong><small>不含月費</small></div>
+        <div class="kpi"><span>固定承諾</span><strong>%s</strong><small>%s</small></div>
+        <div class="kpi"><span>影子價值</span><strong>%s</strong><small>獨立情境值</small></div>
+        <div class="kpi"><span>本月活動</span><strong>%s</strong><small>%s events</small></div>
+      </div>
+      <div class="machine-list">%s</div>
+      <div class="priority-head">主要算力來源</div>
+      <div class="source-strip">%s</div>
+      %s
+    </section>
+  ]], esc(tostring(ledger.period or "—")), esc((ledger.quality or {}).level == "ok" and "已對帳" or "需留意"),
+    esc(money(totals.cash_metered_usd)), esc(fixedValue), esc(fixedNote),
+    esc(money(totals.shadow_value_usd)), esc(compactNumber(totalTokens)), esc(tostring(totals.events or 0)),
+    machineRows, sourceRows, qualityHTML)
+end
+
+local function ledgerDetailHTML(s)
+  local ledger = s.ledger or {}
+  local totals = ledger.totals or {}
+  local function rows(items, labels)
+    local html = ""
+    for _, item in ipairs(items or {}) do
+      if type(item) == "table" then
+        local id = tostring(item.id or "unknown")
+        html = html .. string.format([[
+          <div class="detail-row">
+            <div><b>%s</b><small>%s events · %s tokens</small></div>
+            <div class="detail-money"><b>%s</b><small>影子 %s</small></div>
+          </div>
+        ]], esc((labels or {})[id] or id), esc(tostring(item.events or 0)),
+          esc(compactNumber(item.tokens)), esc(money(item.cash_usd)), esc(money(item.shadow_usd)))
+      end
+    end
+    return html ~= "" and html or '<div class="detail-empty">尚無本月資料</div>'
+  end
+
+  local sourceLabels = {
+    ["claude-code-oauth-quota"] = "Claude Code 訂閱",
+    ["codex-plus-subscription"] = "Codex 訂閱",
+    ["opencode-go-subscription"] = "OpenCode Go 訂閱",
+    ["nim-free-quota"] = "NVIDIA NIM 免費額度",
+    ["cerebras-free"] = "Cerebras 免費額度",
+    ["local-ollama"] = "Ollama 本地算力",
+    ["local-mlx"] = "MLX 本地算力",
+  }
+  local machineLabels = { m5 = "M5 主腦", m4 = "M4 控制面", unknown = "未歸屬" }
+  local classLabels = {
+    subscription = "訂閱制", free_cloud = "免費雲端", local_compute = "本地算力",
+    metered_paid = "按量付費", unknown = "未知來源",
+  }
+  local fixed = totals.fixed_verified and money(totals.fixed_commitment_usd) or "待帳單確認"
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="ledger" aria-hidden="true"></div>
+    <section class="detail-sheet" id="ledger-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="ledger-sheet-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="sheet-head">
+        <div><span>成本帳本 · %s</span><h2 id="ledger-sheet-title">本月完整明細</h2></div>
+        <button class="sheet-close" type="button" data-sheet-close="ledger" aria-label="關閉成本明細">×</button>
+      </header>
+      <div class="sheet-summary">
+        <div><span>按量實付</span><b>%s</b></div>
+        <div><span>固定承諾</span><b>%s</b></div>
+        <div><span>影子價值</span><b>%s</b></div>
+      </div>
+      <div class="sheet-scroll">
+        <h3>算力來源</h3>%s
+        <h3>機器歸屬</h3>%s
+        <h3>成本分類</h3>%s
+        <div class="meaning-note">影子價值是替代成本情境，不等於現金支出；未知與未驗帳會保持未知。</div>
+      </div>
+    </section>
+  ]], esc(tostring(ledger.period or "—")), esc(money(totals.cash_metered_usd)), esc(fixed),
+    esc(money(totals.shadow_value_usd)), rows(ledger.sources, sourceLabels),
+    rows(ledger.machines, machineLabels), rows(ledger.classes, classLabels))
+end
+
+local TOKEN_SOURCE_LABELS = {
+  ["claude-code-oauth-quota"] = "Claude Code",
+  ["codex-plus-subscription"] = "Codex",
+  ["opencode-go-subscription"] = "OpenCode Go",
+  ["grok-build-subscription"] = "Grok Build",
+  ["antigravity-google-ai-pro-subscription"] = "Antigravity",
+  ["nim-free-quota"] = "NVIDIA NIM",
+  ["cerebras-free"] = "Cerebras",
+  ["local-ollama"] = "Ollama",
+  ["local-mlx"] = "MLX",
+}
+
+local function share(value, total)
+  local v, t = tonumber(value) or 0, tonumber(total) or 0
+  if t <= 0 then return 0 end
+  return math.floor(v * 1000 / t + 0.5) / 10
+end
+
+local function tokenTrendHTML(points, days, label)
+  local list = points or {}
+  local startIndex = math.max(1, #list - (days or 30) + 1)
+  local maxTokens = 0
+  for index = startIndex, #list do
+    maxTokens = math.max(maxTokens, tonumber(list[index].tokens) or 0)
+  end
+  local bars = ""
+  for index = startIndex, #list do
+    local point = list[index] or {}
+    local tokens = tonumber(point.tokens) or 0
+    local height = maxTokens > 0 and math.max(5, math.floor(tokens * 100 / maxTokens + .5)) or 5
+    bars = bars .. string.format('<span style="height:%d%%" title="%s · %s Token"></span>',
+      height, esc(point.date or "—"), esc(compactNumber(tokens)))
+  end
+  return string.format([[
+    <div class="token-trend" role="img" aria-label="%s每日 Token 趨勢">
+      <div class="trend-head"><span>%s</span><small>每日 Token</small></div>
+      <div class="trend-bars">%s</div>
+    </div>
+  ]], esc(label or "近 30 日"), esc(label or "近 30 日趨勢"), bars)
+end
+
+local function computeTrendLineHTML(points)
+  local list = points or {}
+  local maxTokens = 0
+  for _, point in ipairs(list) do
+    maxTokens = math.max(maxTokens, tonumber(point.free_cloud) or 0, tonumber(point.local_compute) or 0)
+  end
+  local freePoints, localPoints = {}, {}
+  local count = math.max(1, #list)
+  for index, point in ipairs(list) do
+    local x = count > 1 and ((index - 1) * 300 / (count - 1)) or 0
+    local freeY = maxTokens > 0 and (74 - (tonumber(point.free_cloud) or 0) * 62 / maxTokens) or 74
+    local localY = maxTokens > 0 and (74 - (tonumber(point.local_compute) or 0) * 62 / maxTokens) or 74
+    table.insert(freePoints, string.format("%.1f,%.1f", x, freeY))
+    table.insert(localPoints, string.format("%.1f,%.1f", x, localY))
+  end
+  local latest = list[#list] or {}
+  return string.format([[
+    <div class="compute-line-chart" role="img" aria-label="近 30 日免費雲端與本地算力 Token 線圖">
+      <div class="trend-head"><span>近 30 日算力走勢</span><small>每日 Token</small></div>
+      <svg viewBox="0 0 300 82" preserveAspectRatio="none" aria-hidden="true">
+        <path class="chart-grid" d="M0 12H300 M0 43H300 M0 74H300" />
+        <polyline class="compute-line free-line" points="%s" />
+        <polyline class="compute-line local-line" points="%s" />
+      </svg>
+      <div class="line-legend">
+        <span class="free-legend">免費雲 <b>%s</b></span>
+        <span class="local-legend">本地 <b>%s</b></span>
+      </div>
+    </div>
+  ]], table.concat(freePoints, " "), table.concat(localPoints, " "),
+    esc(compactNumber(latest.free_cloud or 0)), esc(compactNumber(latest.local_compute or 0)))
+end
+
+local function tokenSourceLineHTML(points, days, label)
+  local list = points or {}
+  local startIndex = math.max(1, #list - (days or 30) + 1)
+  local series = {
+    { id="claude", label="Claude", class="claude-line" },
+    { id="codex", label="Codex", class="codex-line" },
+    { id="free_cloud", label="免費雲", class="free-line" },
+    { id="local_compute", label="本地", class="local-line" },
+    { id="other", label="其他", class="other-line" },
+  }
+  local maxTokens, periodTotal = 0, 0
+  for index = startIndex, #list do
+    local point = list[index] or {}
+    periodTotal = periodTotal + (tonumber(point.tokens) or 0)
+    for _, item in ipairs(series) do maxTokens = math.max(maxTokens, tonumber(point[item.id]) or 0) end
+  end
+  local count = math.max(1, #list - startIndex + 1)
+  local lines, legends = "", ""
+  for _, item in ipairs(series) do
+    local coords, total = {}, 0
+    for index = startIndex, #list do
+      local value = tonumber((list[index] or {})[item.id]) or 0
+      total = total + value
+      local x = count > 1 and ((index - startIndex) * 300 / (count - 1)) or 0
+      local y = maxTokens > 0 and (82 - value * 70 / maxTokens) or 82
+      table.insert(coords, string.format("%.1f,%.1f", x, y))
+    end
+    lines = lines .. string.format('<polyline class="source-line %s" points="%s" />', item.class, table.concat(coords, " "))
+    legends = legends .. string.format('<div class="source-legend %s-legend"><span>%s</span><b>%s</b><small>%.1f%%</small></div>',
+      item.id:gsub("_", "-"), esc(item.label), esc(compactNumber(total)), share(total, periodTotal))
+  end
+  return string.format([[
+    <div class="source-line-chart" role="img" aria-label="%s五類 Token 來源線圖">
+      <div class="trend-head"><span>%s</span><small>同尺度 · 每日 Token</small></div>
+      <svg viewBox="0 0 300 90" preserveAspectRatio="none" aria-hidden="true">
+        <path class="chart-grid" d="M0 12H300 M0 47H300 M0 82H300" />%s
+      </svg>
+      <div class="source-legends">%s</div>
+    </div>
+  ]], esc(label), esc(label), lines, legends)
+end
+
+local function tokenLedgerOverviewHTML(s)
+  local ledger = s.ledger or {}
+  if ledger.ok ~= true then return ledgerOverviewHTML(s) end
+  local windows = ledger.windows or {}
+  local trend = ledger.trend_30d or {}
+  local recent, week, month = windows["3d"] or {}, windows["7d"] or {}, windows["30d"] or {}
+  local compute = ledger.compute_capacity or {}
+  local free = compute.free_cloud or {}
+  local localCompute = compute.local_compute or {}
+  local sourceTokens = {}
+  for _, item in ipairs(month.sources or {}) do
+    sourceTokens[tostring(item.id or "unknown")] = tonumber(item.tokens) or 0
+  end
+  local claudeTokens = sourceTokens["claude-code-oauth-quota"] or 0
+  local codexTokens = sourceTokens["codex-plus-subscription"] or 0
+  local freeTokens = tonumber(free.tokens) or 0
+  local localTokens = tonumber(localCompute.tokens) or 0
+  local otherTokens = math.max(0, (tonumber(month.tokens) or 0) - claudeTokens - codexTokens - freeTokens - localTokens)
+  local function metricChip(tileId, label, tokens, sheet, extraClass)
+    return string.format([[
+      <div class="source-chip token-source %s" data-sheet-open="%s" tabindex="0" role="button">
+        <span>%s</span><b>%s</b><small>%.1f%%</small>
+      </div>
+    ]], extraClass or "", sheet, esc(label), esc(compactNumber(tokens)), share(tokens, month.tokens))
+  end
+  local sourceTiles = {
+    claude = metricChip("claude", "Claude", claudeTokens, "ledger", "claude-metric"),
+    codex = metricChip("codex", "Codex", codexTokens, "ledger", "codex-metric"),
+    free = metricChip("free", "免費雲端", freeTokens, "compute", "free-metric"),
+    other = metricChip("other", "其他", otherTokens, "ledger", "other-metric"),
+  }
+  sourceTiles["local"] = metricChip("local", "本地算力", localTokens, "compute", "local-metric")
+  local topSources = ""
+  for _, id in ipairs(normalizedTileOrder("token_sources", prefs.token_source_order)) do
+    topSources = topSources .. (sourceTiles[id] or "")
+  end
+  if topSources == "" then topSources = '<div class="source-chip"><span>平台</span><b>—</b><small>無資料</small></div>' end
+
+  local warningLabels = {
+    naive_timestamps_assumed_local = "部分時間以台北時間解讀",
+    invalid_timestamps_skipped = "少量無效事件已略過",
+    unknown_quota_source = "存在未知平台來源",
+    machine_attribution_missing = "存在未歸屬機器",
+    ledger_stale = "Token 帳本資料已過期",
+  }
+  local warnings = {}
+  for _, code in ipairs((ledger.quality or {}).warnings or {}) do
+    if warningLabels[tostring(code)] and #warnings < 2 then table.insert(warnings, warningLabels[tostring(code)]) end
+  end
+  local quality = #warnings > 0
+      and '<div class="quality-banner" role="status">' .. esc(table.concat(warnings, " · ")) .. '</div>' or ""
+
+  local kpiTiles = {
+    ["3d"] = string.format(
+      [[<button type="button" class="kpi window-kpi" data-sheet-open="ledger" data-window-target="3d"><span>近 3 日</span><strong>%s</strong><small>%.1f%%／近 30 日</small></button>]],
+      esc(compactNumber(recent.tokens)), share(recent.tokens, month.tokens)
+    ),
+    ["7d"] = string.format(
+      [[<button type="button" class="kpi window-kpi" data-sheet-open="ledger" data-window-target="7d"><span>近 7 日</span><strong>%s</strong><small>%.1f%%／近 30 日</small></button>]],
+      esc(compactNumber(week.tokens)), share(week.tokens, month.tokens)
+    ),
+    ["30d"] = string.format(
+      [[<button type="button" class="kpi window-kpi" data-sheet-open="ledger" data-window-target="30d"><span>近 30 日</span><strong>%s</strong><small>%s events</small></button>]],
+      esc(compactNumber(month.tokens)), esc(tostring(month.events or 0))
+    ),
+  }
+  local kpiHtml = ""
+  for _, id in ipairs(normalizedTileOrder("token_kpis", prefs.token_kpi_order)) do
+    kpiHtml = kpiHtml .. (kpiTiles[id] or "")
+  end
+
+  local totals = ledger.totals or {}
+  local shadow = money(totals.shadow_value_usd)
+  local cash = money(totals.cash_metered_usd)
+  local events = tostring(totals.events or month.events or 0)
+  local costStrip = string.format([[
+    <div class="cost-strip" data-sheet-open="ledger" tabindex="0" role="button" aria-label="本月成本摘要">
+      <div class="cost-chip"><span>Shadow</span><b>%s</b></div>
+      <div class="cost-chip"><span>Cash</span><b>%s</b></div>
+      <div class="cost-chip"><span>Events</span><b>%s</b></div>
+    </div>
+  ]], esc(shadow), esc(cash), esc(events))
+
+  return string.format([[
+    <section class="ledger-overview token-overview" aria-label="Token 使用研究總覽">
+      <div class="ledger-head">
+        <div><div class="section-kicker">TOKEN LEDGER · %s</div><div class="ledger-title">Token 使用研究</div></div>
+        <div class="ledger-actions">
+          <button type="button" data-sheet-open="compute">算力</button>
+          <button type="button" data-sheet-open="ledger">Token</button>
+        </div>
+      </div>
+      %s
+      <div class="kpi-grid token-kpis">%s</div>
+      %s
+      <div class="token-share-track"><span style="width:%.1f%%"></span></div>
+      <div class="priority-head">近 30 日 Token 來源</div>
+      <div class="source-strip">%s</div>
+      %s
+    </section>
+  ]], esc(tostring(ledger.period or "—")), costStrip, kpiHtml, computeTrendLineHTML(trend),
+    share(week.tokens, month.tokens), topSources, quality)
+end
+
+local function tokenRows(items, total, labels, limit)
+  local html = ""
+  for index, item in ipairs(items or {}) do
+    if index > (limit or 12) then break end
+    local id = tostring(item.id or "unknown")
+    local percent = share(item.tokens, total)
+    html = html .. string.format([[
+      <div class="token-row">
+        <div class="token-row-head"><span>%s</span><b>%s <small>%.1f%%</small></b></div>
+        <div class="token-row-track"><span style="width:%.1f%%"></span></div>
+      </div>
+    ]], esc((labels or {})[id] or id), esc(compactNumber(item.tokens)), percent, percent)
+  end
+  return html ~= "" and html or '<div class="detail-empty">這個時間窗尚無 Token 資料</div>'
+end
+
+local function tokenWindowPanel(name, window, active, trend)
+  window = window or {}
+  local localItems = {}
+  for _, item in ipairs(window.sources or {}) do
+    if tostring(item.class or "") == "local_compute" then table.insert(localItems, item) end
+  end
+  return string.format([[
+    <div class="window-panel%s" data-window-panel="%s">
+      <div class="window-hero"><span>總 Token</span><strong>%s</strong><small>%s events · 本地 %.1f%%</small></div>
+      %s
+      <h3>各平台 Token</h3>%s
+      <h3>本地算力</h3>%s
+      <h3>各專案 Token</h3>%s
+    </div>
+  ]], active and " is-active" or "", esc(name), esc(compactNumber(window.tokens)),
+    esc(tostring(window.events or 0)), tonumber(window.local_share_pct) or 0,
+    tokenSourceLineHTML(trend, name == "7d" and 7 or (name == "3d" and 3 or 30), "近 " .. name .. " Token 來源趨勢"),
+    tokenRows(window.sources, window.tokens, TOKEN_SOURCE_LABELS, 12),
+    tokenRows(localItems, window.local_tokens, TOKEN_SOURCE_LABELS, 8),
+    tokenRows(window.projects, window.tokens, nil, 12))
+end
+
+local function tokenLedgerDetailHTML(s)
+  local ledger = s.ledger or {}
+  local windows = ledger.windows or {}
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="ledger" aria-hidden="true"></div>
+    <section class="detail-sheet token-sheet" id="ledger-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="ledger-sheet-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="sheet-head">
+        <div><span>TOKEN ANALYTICS</span><h2 id="ledger-sheet-title">Token 使用分析</h2></div>
+        <button class="sheet-close" type="button" data-sheet-close="ledger" aria-label="關閉 Token 分析">×</button>
+      </header>
+      <div class="window-tabs" role="tablist" aria-label="Token 時間範圍">
+        <button class="is-active" type="button" data-window="7d">近 7 日</button>
+        <button type="button" data-window="3d">近 3 日</button>
+        <button type="button" data-window="30d">近 30 日</button>
+      </div>
+      <div class="sheet-scroll">
+        %s%s%s
+        <div class="meaning-note">平台與專案比例以所選時間窗 Token 總量計算；本地算力包含 local-ollama 與 local-mlx 等明確本地來源。</div>
+      </div>
+    </section>
+  ]], tokenWindowPanel("7d", windows["7d"], true, ledger.trend_30d), tokenWindowPanel("3d", windows["3d"], false, ledger.trend_30d),
+    tokenWindowPanel("30d", windows["30d"], false, ledger.trend_30d))
+end
+
+local function computeCapacityOverviewHTML(s)
+  local compute = (s.ledger or {}).compute_capacity or {}
+  local free = compute.free_cloud or {}
+  local localCompute = compute.local_compute or {}
+  local combined = compute.combined or {}
+  local slotCount = free.credential_slot_count or free.api_key_count or 0
+  local coverage = tonumber(free.coverage_score)
+  local coverageText = coverage and string.format("覆蓋 %.1f%%", coverage) or "覆蓋未知"
+  local purpose = "尚無已歸屬 Key 用途"
+  local firstKey = (free.keys or {})[1]
+  if type(firstKey) == "table" and type((firstKey.scenarios or {})[1]) == "table" then
+    purpose = tostring(firstKey.scenarios[1].label or purpose)
+  end
+  return string.format([[
+    <section class="compute-overview" aria-label="免費雲端與本地算力總覽">
+      <div class="ledger-head">
+        <div><div class="section-kicker">COMPUTE CAPACITY · 近 30 日</div><div class="ledger-title">免費雲端＋本地算力</div></div>
+        <div class="ledger-status"><span class="status-dot compute-dot"></span>點擊看 Slot</div>
+      </div>
+      <div class="compute-grid">
+        <div class="compute-stat free-stat"><span>免費雲端 · 第一級</span><strong>%s</strong><small>%s 個匿名 credential slot</small></div>
+        <div class="compute-stat local-stat"><span>本地算力</span><strong>%s</strong><small>Ollama／MLX</small></div>
+        <div class="compute-stat combined-stat"><span>合計</span><strong>%s</strong><small>免費 %.1f%% · 本地 %.1f%%</small></div>
+      </div>
+      <div class="compute-ratio" aria-label="免費雲與本地算力比例">
+        <span class="free-ratio" style="width:%.1f%%"></span><span class="local-ratio" style="width:%.1f%%"></span>
+      </div>
+      <div class="compute-trust"><span>%s</span><b>%s 筆未歸屬事件</b></div>
+      <div class="compute-purpose"><span>主要用途</span><b>%s</b></div>
+    </section>
+  ]], esc(compactNumber(free.tokens)), esc(tostring(slotCount)),
+    esc(compactNumber(localCompute.tokens)), esc(compactNumber(combined.tokens)),
+    tonumber(free.share_pct) or 0, tonumber(localCompute.share_pct) or 0,
+    tonumber(free.share_pct) or 0, tonumber(localCompute.share_pct) or 0,
+    esc(coverageText), esc(tostring(free.unattributed_events or 0)), esc(purpose))
+end
+
+local function keyDetailRows(keys, freeTotal)
+  local html = ""
+  for _, key in ipairs(keys or {}) do
+    if type(key) == "table" then
+      local scenarios, sources = "", ""
+      for _, item in ipairs(key.scenarios or {}) do
+        scenarios = scenarios .. string.format('<li><span>%s</span><b>%s</b></li>',
+          esc(item.label or "未標記用途"), esc(compactNumber(item.tokens)))
+      end
+      for _, item in ipairs(key.sources or {}) do
+        local sourceId = tostring(item.id or "unknown")
+        sources = sources .. string.format('<span class="key-source">%s · %s</span>',
+          esc(TOKEN_SOURCE_LABELS[sourceId] or sourceId), esc(compactNumber(item.tokens)))
+      end
+      html = html .. string.format([[
+        <details class="key-card">
+          <summary>
+            <span><b>%s</b><small>%s events · %.1f%% 免費雲</small></span>
+            <strong>%s</strong>
+          </summary>
+          <div class="key-body">
+            <div class="key-sources">%s</div>
+            <h4>使用場景</h4><ul>%s</ul>
+          </div>
+        </details>
+      ]], esc(key.id or "key-unknown"), esc(tostring(key.events or 0)), share(key.tokens, freeTotal),
+        esc(compactNumber(key.tokens)), sources, scenarios ~= "" and scenarios or '<li><span>未標記用途</span></li>')
+    end
+  end
+  return html ~= "" and html or '<div class="detail-empty">目前沒有可辨識的免費雲 credential slot；這不代表使用量為零。</div>'
+end
+
+local function computeCapacityDetailHTML(s)
+  local compute = (s.ledger or {}).compute_capacity or {}
+  local free = compute.free_cloud or {}
+  local localCompute = compute.local_compute or {}
+  local combined = compute.combined or {}
+  local slotCount = free.credential_slot_count or free.api_key_count or 0
+  local coverage = tonumber(free.coverage_score)
+  local coverageText = coverage and string.format("%.1f%%", coverage) or "未知"
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="compute" aria-hidden="true"></div>
+    <section class="detail-sheet compute-sheet" id="compute-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="compute-sheet-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="sheet-head">
+        <div><span>COMPUTE CAPACITY · 近 30 日</span><h2 id="compute-sheet-title">免費雲端與本地算力</h2></div>
+        <button class="sheet-close" type="button" data-sheet-close="compute" aria-label="關閉算力明細">×</button>
+      </header>
+      <div class="sheet-summary compute-summary">
+        <div><span>免費雲端</span><b>%s</b><small>%s credential slots</small></div>
+        <div><span>本地算力</span><b>%s</b><small>%.1f%%</small></div>
+        <div><span>兩者合計</span><b>%s</b><small>100%%</small></div>
+      </div>
+      <div class="sheet-scroll">
+        <div class="coverage-callout"><span>資料覆蓋</span><strong>%s</strong><small>%s · 未歸屬不等於零使用</small></div>
+        <h3>Credential Slot 與用途</h3>
+        %s
+        <div class="meaning-note">Slot 是穩定匿名歸因單位，不是平台數，也不顯示原始 API 金鑰。另有 %s 筆、%s Token 尚未歸屬到 Slot。</div>
+        <h3>免費雲端平台</h3>%s
+        <h3>本地算力來源</h3>%s
+      </div>
+    </section>
+  ]], esc(compactNumber(free.tokens)), esc(tostring(slotCount)),
+    esc(compactNumber(localCompute.tokens)), tonumber(localCompute.share_pct) or 0,
+    esc(compactNumber(combined.tokens)), esc(coverageText), esc(tostring(free.confidence_state or "unknown")), keyDetailRows(free.keys, free.tokens),
+    esc(tostring(free.unattributed_events or 0)), esc(compactNumber(free.unattributed_tokens)),
+    tokenRows(free.sources, free.tokens, TOKEN_SOURCE_LABELS, 12),
+    tokenRows(localCompute.sources, localCompute.tokens, TOKEN_SOURCE_LABELS, 12))
+end
+
+local function computeLensHTML(s)
+  return string.format('<div class="compute-lens">%s</div>', tokenLedgerOverviewHTML(s))
+end
+
+local function sectionFrame(id, title, content, options)
+  options = options or {}
+  if content == nil or content == "" then return "" end
+  local clickable = options.sheet and string.format(' data-sheet-open="%s" tabindex="0" role="button"', esc(options.sheet)) or ""
+  local chevron = options.sheet and '<span class="section-chevron">›</span>' or ""
+  -- Reorder lives in the dedicated 排序 sheet — dashboard stays clean.
+  return string.format([[
+    <section class="dashboard-section" data-section-id="%s" draggable="false">
+      <div class="section-content"%s>%s%s</div>
+    </section>
+  ]], esc(id), clickable, content or "", chevron)
+end
+
 local function buildHTML(s)
   s = s or {}
   local host = s.host or {}
@@ -544,8 +1380,45 @@ local function buildHTML(s)
     pctText(host.cpu_pct)
   )
 
-  local cards = table.concat({
-    rowHTML({
+  local ag = s.antigravity or {}
+  local agMain = "離線"
+  local agSub = ag.error or "啟動 agy / Antigravity CLI 後顯示"
+  local agBars = {}
+  if ag.ok then
+    agMain = pctText(ag.used_pct or ag.session_used_pct) .. " · 最緊模型窗"
+    agSub = string.format(
+      "%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
+      tostring(ag.plan or "—"),
+      tostring(ag.prompt_credits_available or "—"),
+      tostring(ag.prompt_credits_monthly or "—"),
+      tostring(ag.flow_credits_available or "—"),
+      tostring(ag.flow_credits_monthly or "—"),
+      tostring(ag.next_reset or "—"):sub(1, 16)
+    )
+    agBars = {
+      { label = "Session（最緊模型）", pct = ag.used_pct or ag.session_used_pct },
+    }
+    local models = ag.models or {}
+    local scored = {}
+    for _, m in ipairs(models) do
+      if type(m) == "table" and m.used_pct ~= nil then
+        table.insert(scored, m)
+      end
+    end
+    table.sort(scored, function(a, b)
+      return (a.used_pct or 0) > (b.used_pct or 0)
+    end)
+    for i = 1, math.min(3, #scored) do
+      table.insert(agBars, {
+        label = tostring(scored[i].label or "model"),
+        pct = scored[i].used_pct,
+      })
+    end
+  end
+
+  local providerCards = {
+    claude = rowHTML({
+      id = "claude",
       name = "Claude",
       badge = cl.model or nil,
       accent = "#D97757",
@@ -556,7 +1429,8 @@ local function buildHTML(s)
         { label = "7 日視窗", pct = cl.seven_day_pct },
       } or {},
     }),
-    rowHTML({
+    codex = rowHTML({
+      id = "codex",
       name = "Codex",
       badge = cx.plan_type,
       accent = "#10A37F",
@@ -567,7 +1441,8 @@ local function buildHTML(s)
         { label = "7 日視窗", pct = cx.seven_day_pct },
       } or {},
     }),
-    rowHTML({
+    go = rowHTML({
+      id = "go",
       name = "OpenCode Go",
       badge = go.price or "$10/mo",
       accent = "#FF9F0A",
@@ -575,17 +1450,28 @@ local function buildHTML(s)
       sub = goSub,
       bars = goBars,
     }),
-    rowHTML({
+    grok = rowHTML({
+      id = "grok",
       name = "Grok",
       badge = "credits",
-      accent = "#BF5AF2", -- system purple
+      accent = "#BF5AF2",
       main = gkMain,
       sub = gkSub,
       bars = gk.ok and {
         { label = "本月額度", pct = gk.used_pct },
       } or {},
     }),
-    rowHTML({
+    antigravity = rowHTML({
+      id = "antigravity",
+      name = "Antigravity",
+      badge = ag.ok and tostring(ag.plan or "CLI") or "CLI",
+      accent = "#4285F4",
+      main = agMain,
+      sub = agSub,
+      bars = agBars,
+    }),
+    mac = rowHTML({
+      id = "mac",
       name = "Mac",
       badge = "Mac",
       accent = "#0A84FF",
@@ -596,7 +1482,12 @@ local function buildHTML(s)
         { label = "CPU", pct = host.cpu_pct },
       },
     }),
-  }, "\n")
+  }
+  local orderedProviders = {}
+  for _, id in ipairs(normalizedTileOrder("providers", prefs.provider_order)) do
+    if providerCards[id] then table.insert(orderedProviders, providerCards[id]) end
+  end
+  local cards = table.concat(orderedProviders, "\n")
 
   local updated = ""
   if s.polled_at then
@@ -618,12 +1509,23 @@ local function buildHTML(s)
     hero = heroRingsHTML(s)
   end
   local radar = pressureRadarHTML(s)
+  local sections = {
+    compute = sectionFrame("compute", "算力與 Token", computeLensHTML(s), { fixed = true }),
+    radar = sectionFrame("radar", "壓力雷達", radar),
+    loaders = sectionFrame("loaders", "額度圓環", hero),
+    providers = sectionFrame("providers", "服務與主機", '<div class="list">' .. cards .. '</div>'),
+  }
+  local orderedSections = ""
+  for _, id in ipairs(normalizedSectionOrder(prefs.section_order)) do
+    orderedSections = orderedSections .. (sections[id] or "")
+  end
+  local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s) .. layoutReorderSheetHTML()
   local auroraCSS = ""
   if prefs.theme == "aurora" then
     auroraCSS = [[
   .shell.aurora::before {
     content: "";
-    position: absolute; inset: 0; border-radius: 16px; pointer-events: none;
+    position: absolute; inset: 0; border-radius: 24px; pointer-events: none;
     background:
       radial-gradient(70% 50% at 15% 20%, rgba(56,189,248,0.28), transparent 55%),
       radial-gradient(60% 45% at 85% 30%, rgba(244,114,182,0.22), transparent 50%),
@@ -673,16 +1575,17 @@ local function buildHTML(s)
   }
   .shell {
     height: 100%%;
-    padding: 10px 10px 8px;
+    padding: 16px 14px 12px;
     background:
       radial-gradient(120%% 80%% at 0%% 0%%, var(--glow1), transparent 52%%),
       radial-gradient(100%% 70%% at 100%% 100%%, var(--glow2), transparent 48%%),
       var(--bg);
-    border-radius: 16px;
-    border: 0.5px solid var(--card-border);
+    border-radius: 30px;
+    border: 0.5px solid rgba(255,255,255,0.18);
     box-shadow:
-      0 22px 56px rgba(0,0,0,0.48),
-      0 0 0 0.5px rgba(0,0,0,0.28) inset;
+      0 32px 80px rgba(0,0,0,0.52),
+      0 1px 0 rgba(255,255,255,0.20) inset,
+      0 0 0 0.5px rgba(0,0,0,0.24) inset;
     backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
     display: flex;
@@ -696,30 +1599,184 @@ local function buildHTML(s)
     overflow: auto;
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 12px;
     padding: 2px 2px 8px;
     -webkit-overflow-scrolling: touch;
   }
+  .dashboard-section { position: relative; border-radius: 24px; }
+  .section-content { position: relative; border-radius: inherit; outline: none; }
+  .section-content[data-sheet-open] { cursor: pointer; }
+  .section-content[data-sheet-open]:focus-visible { box-shadow: 0 0 0 3px rgba(10,132,255,.45); }
+  .section-chevron {
+    position: absolute; top: 16px; right: 15px; width: 25px; height: 25px;
+    display: flex; align-items: center; justify-content: center; border-radius: 50%%;
+    color: var(--label); background: rgba(120,120,128,.18); font-size: 22px; line-height: 1;
+  }
+  .sheet-close {
+    appearance: none; border: 0; color: var(--text); background: rgba(120,120,128,.24);
+    border-radius: 9px; min-width: 48px; height: 30px; padding: 0 10px; font: inherit;
+    font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  /* Apple Settings / HIG: inset grouped list + edit-mode reorder control */
+  .layout-sheet {
+    background:
+      linear-gradient(180deg, rgba(28,28,30,.98), rgba(28,28,30,.94)) !important;
+  }
+  .layout-nav {
+    display: grid;
+    grid-template-columns: 72px 1fr 72px;
+    align-items: center;
+    min-height: 44px;
+    margin: 2px 0 10px;
+    padding: 0 2px;
+  }
+  .layout-nav-title {
+    margin: 0; text-align: center;
+    font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
+  }
+  .layout-nav-btn {
+    appearance: none; border: 0; margin: 0; padding: 8px 4px;
+    background: transparent; font: inherit; font-size: 17px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .layout-nav-cancel {
+    justify-self: start; color: var(--blue); font-weight: 400;
+  }
+  .layout-nav-done {
+    justify-self: end; color: var(--blue); font-weight: 600;
+  }
+  .layout-nav-btn:active { opacity: .45; }
+  .layout-scroll {
+    display: flex; flex-direction: column; gap: 0;
+    padding-bottom: 20px;
+  }
+  .sort-section { margin: 0 0 22px; }
+  .sort-section-title {
+    margin: 0 16px 7px;
+    font-size: 13px; font-weight: 400;
+    letter-spacing: -0.01em;
+    color: rgba(235,235,245,.55);
+    text-transform: none;
+  }
+  .sort-section-footer {
+    margin: 7px 16px 0;
+    font-size: 13px; line-height: 1.35;
+    color: rgba(235,235,245,.45);
+  }
+  .sort-list {
+    margin: 0 12px;
+    border-radius: 12px;
+    background: rgba(44,44,46,.92);
+    overflow: hidden;
+    border: .5px solid rgba(255,255,255,.06);
+  }
+  .sort-row {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) 44px;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 4px 0 14px;
+    background: transparent;
+    position: relative;
+    transition: background .12s ease, box-shadow .12s ease, opacity .12s ease;
+    user-select: none; -webkit-user-select: none;
+  }
+  .sort-row + .sort-row::before {
+    content: "";
+    position: absolute; left: 42px; right: 0; top: 0; height: .5px;
+    background: rgba(84,84,88,.65);
+  }
+  .sort-row.is-fixed {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    padding-right: 14px;
+    opacity: .78;
+  }
+  .sort-row.is-dragging {
+    z-index: 60;
+    border-radius: 12px;
+    background: rgba(58,58,60,.98);
+    box-shadow: 0 10px 28px rgba(0,0,0,.40);
+    opacity: .98;
+  }
+  .sort-row.is-dragging::before { display: none; }
+  .sort-placeholder {
+    min-height: 44px;
+    background: rgba(10,132,255,.08);
+  }
+  .sort-leading {
+    display: flex; align-items: center; justify-content: flex-start;
+  }
+  .sort-dot {
+    width: 9px; height: 9px; border-radius: 50%%;
+    box-shadow: 0 0 0 .5px rgba(255,255,255,.12);
+  }
+  .sort-label {
+    font-size: 17px; font-weight: 400;
+    letter-spacing: -0.02em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sort-fixed-label {
+    font-size: 15px; font-weight: 400;
+    color: rgba(235,235,245,.42);
+    padding-right: 2px;
+  }
+  .sort-grip {
+    appearance: none; border: 0; margin: 0; padding: 0;
+    width: 44px; height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: rgba(235,235,245,.42);
+    background: transparent;
+    cursor: grab; touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sort-grip:active, .sort-row.is-dragging .sort-grip {
+    cursor: grabbing; color: rgba(235,235,245,.72);
+  }
+  .sort-grip-icon { display: block; pointer-events: none; }
+  .layout-reset {
+    appearance: none; border: 0;
+    margin: 4px 12px 8px; padding: 14px 16px;
+    width: calc(100%% - 24px);
+    border-radius: 12px;
+    color: #FF453A;
+    background: rgba(44,44,46,.92);
+    border: .5px solid rgba(255,255,255,.06);
+    font: inherit; font-size: 17px; font-weight: 400;
+    cursor: pointer; text-align: center;
+  }
+  .layout-reset:active { opacity: .55; }
+  .shell.is-compact .data { gap: 8px; }
+  .shell.is-compact .card { padding: 9px 12px; }
+  .shell.is-compact .sub, .shell.is-compact .meter { display: none; }
+  .shell.is-compact .ledger-overview { padding: 12px; }
+  .shell.is-compact .machine-list, .shell.is-compact .priority-head, .shell.is-compact .source-strip { display: none; }
   .customize {
     flex: 0 0 auto;
     border-top: 1px solid var(--card-border);
-    padding: 10px 4px 4px;
+    padding: 8px 4px 4px;
     margin-top: 2px;
     background: linear-gradient(180deg, rgba(0,0,0,0.12), transparent 28px);
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 8px;
   }
 %s
   .top {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     padding: 2px 4px 2px;
   }
+  .top-actions { display: flex; gap: 6px; }
+  .top-button {
+    appearance: none; border: .5px solid rgba(255,255,255,.10); border-radius: 999px;
+    padding: 6px 10px; color: var(--text); background: rgba(120,120,128,.18);
+    font: inherit; font-size: 10px; font-weight: 700; cursor: pointer;
+  }
+  .top-button.is-active { color: white; background: var(--blue); }
   .title {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 700;
     letter-spacing: -0.01em;
   }
   .title span {
@@ -732,8 +1789,105 @@ local function buildHTML(s)
     font-size: 11px;
     color: var(--sub);
     font-variant-numeric: tabular-nums;
-    text-align: right;
+    text-align: left;
+    padding: 1px 4px 8px;
   }
+  .ledger-overview {
+    background:
+      linear-gradient(145deg, rgba(255,255,255,0.09), rgba(255,255,255,0.015)),
+      var(--card);
+    border: 0.5px solid var(--card-border);
+    border-radius: 24px;
+    padding: 16px;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.12) inset,
+      0 18px 38px rgba(0,0,0,0.18),
+      0 0 0 0.5px rgba(255,255,255,.06) inset;
+  }
+  .ledger-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    margin-bottom: 12px;
+  }
+  .section-kicker {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: var(--label);
+  }
+  .ledger-title {
+    margin-top: 3px; font-size: 17px; font-weight: 750; letter-spacing: -0.035em;
+  }
+  .ledger-status {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--sub); white-space: nowrap;
+  }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%%; background: #FF9F0A;
+    box-shadow: 0 0 0 3px rgba(255,159,10,0.12);
+  }
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  }
+  .kpi {
+    min-width: 0; padding: 10px 11px;
+    border-radius: 14px;
+    background: rgba(120,120,128,0.13);
+    border: 0.5px solid rgba(255,255,255,0.07);
+  }
+  .kpi span, .kpi small { display: block; color: var(--sub); font-size: 11px; }
+  .kpi strong {
+    display: block; margin: 4px 0 2px; font-size: 22px; line-height: 1;
+    letter-spacing: -0.055em; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .machine-list {
+    display: grid; gap: 6px; margin-top: 12px; padding-top: 10px;
+    border-top: 0.5px solid var(--card-border);
+  }
+  .machine-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+  .machine-name { font-weight: 650; }
+  .machine-evidence { color: var(--sub); font-variant-numeric: tabular-nums; text-align: right; }
+  .machine-evidence.is-empty { opacity: 0.72; }
+  .priority-head { margin: 12px 0 6px; font-size: 11px; font-weight: 650; color: var(--label); }
+  .source-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .source-chip {
+    min-width: 0; padding: 7px 8px; border-radius: 11px;
+    background: rgba(120,120,128,0.12);
+  }
+  .source-chip span, .source-chip b, .source-chip small {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .source-chip span { font-size: 10px; color: var(--sub); }
+  .source-chip b { margin-top: 3px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .source-chip small { margin-top: 1px; font-size: 10px; color: var(--label); }
+  .quality-banner {
+    margin-top: 10px; padding: 8px 10px; border-radius: 11px;
+    color: #FFD18A; background: rgba(255,159,10,0.12);
+    border: 0.5px solid rgba(255,159,10,0.25); font-size: 11px; line-height: 1.35;
+  }
+  .ledger-unavailable { padding: 16px; }
+  .ledger-empty { margin-top: 6px; font-size: 14px; font-weight: 650; }
+  .ledger-empty-detail { margin-top: 6px; font-size: 12px; color: var(--sub); }
+  .cost-strip {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+    margin: 0 0 10px; cursor: pointer;
+  }
+  .cost-chip {
+    min-width: 0; padding: 10px 11px; border-radius: 14px;
+    background: rgba(120,120,128,0.13); border: 0.5px solid rgba(255,255,255,0.07);
+  }
+  .cost-chip span { display: block; font-size: 11px; color: var(--sub); }
+  .cost-chip b {
+    display: block; margin-top: 4px; font-size: 16px; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .appearance summary {
+    list-style: none; cursor: pointer; padding: 7px 8px;
+    border-radius: 11px; font-size: 12px; font-weight: 650;
+    color: var(--label); background: rgba(120,120,128,0.12);
+    -webkit-user-select: none; user-select: none;
+  }
+  .appearance summary::-webkit-details-marker { display: none; }
+  .appearance summary::after { content: "⌄"; float: right; font-size: 14px; }
+  .appearance[open] summary::after { content: "⌃"; }
+  .appearance-body { display: flex; flex-direction: column; gap: 7px; padding-top: 8px; }
   .toolbar {
     display: flex;
     gap: 6px;
@@ -898,9 +2052,172 @@ local function buildHTML(s)
   .card {
     background: var(--card);
     border: 0.5px solid var(--card-border);
-    border-radius: 12px;
-    padding: 9px 11px 10px;
+    border-radius: 22px;
+    padding: 11px 13px 12px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.10) inset, 0 10px 24px rgba(0,0,0,.10);
   }
+  .sheet-backdrop {
+    position: fixed; inset: 0; z-index: 20; opacity: 0; pointer-events: none;
+    background: rgba(0,0,0,.34); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    transition: opacity .24s ease;
+  }
+  .detail-sheet {
+    position: fixed; z-index: 21; left: 8px; right: 8px; bottom: 8px; height: 78%%;
+    display: flex; flex-direction: column; padding: 10px 14px 14px;
+    border-radius: 28px; border: .5px solid rgba(255,255,255,.20);
+    background: linear-gradient(155deg, rgba(70,70,74,.92), rgba(28,28,30,.86));
+    backdrop-filter: blur(54px) saturate(180%%); -webkit-backdrop-filter: blur(54px) saturate(180%%);
+    box-shadow: 0 -18px 60px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.18) inset;
+    transform: translateY(calc(100%% + 16px)); opacity: 0;
+    transition: transform .34s cubic-bezier(.22,1,.36,1), opacity .22s ease;
+  }
+  body.sheet-open .sheet-backdrop[aria-hidden="false"] { opacity: 1; pointer-events: auto; }
+  body.sheet-open .detail-sheet[aria-hidden="false"] { transform: translateY(0); opacity: 1; }
+  .sheet-grabber { width: 38px; height: 5px; margin: 0 auto 10px; border-radius: 9px; background: rgba(235,235,245,.34); }
+  .sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .sheet-head span { font-size: 10px; color: rgba(235,235,245,.58); font-weight: 700; letter-spacing: .08em; }
+  .sheet-head h2 { margin: 3px 0 0; font-size: 22px; letter-spacing: -.045em; }
+  .sheet-close { border-radius: 50%%; font-size: 20px; }
+  .sheet-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; margin: 14px 0 8px; }
+  .sheet-summary div { padding: 10px; border-radius: 15px; background: rgba(120,120,128,.18); }
+  .sheet-summary span, .sheet-summary b { display: block; }
+  .sheet-summary span { font-size: 10px; color: rgba(235,235,245,.58); }
+  .sheet-summary b { margin-top: 4px; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .sheet-scroll { min-height: 0; overflow: auto; padding: 2px 1px 8px; }
+  .sheet-scroll h3 { margin: 14px 4px 6px; font-size: 11px; color: rgba(235,235,245,.58); letter-spacing: .05em; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 11px; border-radius: 14px; background: rgba(120,120,128,.14); margin-bottom: 6px; }
+  .detail-row b, .detail-row small { display: block; }
+  .detail-row b { font-size: 12px; }
+  .detail-row small { margin-top: 3px; color: rgba(235,235,245,.54); font-size: 10px; }
+  .detail-money { text-align: right; font-variant-numeric: tabular-nums; }
+  .detail-empty, .meaning-note { padding: 11px; border-radius: 14px; color: rgba(235,235,245,.60); background: rgba(120,120,128,.12); font-size: 11px; line-height: 1.45; }
+  .token-dot { background: #30D158; box-shadow: 0 0 0 3px rgba(48,209,88,.14); }
+  .token-overview .ledger-status { padding-right: 28px; }
+  .token-share-track, .token-row-track { height: 5px; overflow: hidden; border-radius: 99px; background: rgba(120,120,128,.20); }
+  .token-share-track { margin-top: 11px; }
+  .token-share-track span, .token-row-track span { display: block; height: 100%%; border-radius: inherit; background: linear-gradient(90deg,#0A84FF,#64D2FF); }
+  .local-kpi strong { color: #64D2FF; }
+  .token-trend { margin-top:11px; padding:10px 11px 8px; border-radius:15px; background:rgba(120,120,128,.11); }
+  .trend-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:7px; color:var(--sub); font-size:9px; }
+  .trend-head span { color:var(--text); font-weight:700; }
+  .trend-bars { display:flex; align-items:flex-end; gap:2px; height:48px; }
+  .trend-bars span { flex:1; min-width:2px; border-radius:3px 3px 1px 1px; background:linear-gradient(180deg,#64D2FF,#0A84FF); opacity:.82; transition:height .22s cubic-bezier(.22,1,.36,1),opacity .15s; }
+  .trend-bars span:hover { opacity:1; }
+  .compute-line-chart { margin-top:11px; padding:10px 11px 9px; border-radius:15px; background:linear-gradient(180deg,rgba(100,210,255,.08),rgba(120,120,128,.08)); overflow:hidden; }
+  .compute-line-chart svg { display:block; width:100%%; height:82px; overflow:visible; }
+  .chart-grid { fill:none; stroke:rgba(235,235,245,.10); stroke-width:.7; vector-effect:non-scaling-stroke; }
+  .compute-line { fill:none; stroke-width:2.3; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
+  .free-line { stroke:#30D158; filter:drop-shadow(0 2px 3px rgba(48,209,88,.22)); }
+  .local-line { stroke:#64D2FF; filter:drop-shadow(0 2px 3px rgba(100,210,255,.22)); }
+  .line-legend { display:flex; justify-content:space-between; gap:12px; margin-top:3px; font-size:9px; color:var(--sub); }
+  .line-legend span::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%%; }
+  .free-legend::before { background:#30D158; }
+  .local-legend::before { background:#64D2FF; }
+  .line-legend b { margin-left:4px; color:var(--text); font-variant-numeric:tabular-nums; }
+  .source-line-chart { margin:10px 0 12px; padding:11px; border-radius:17px; background:rgba(120,120,128,.11); }
+  .source-line-chart svg { display:block; width:100%%; height:110px; }
+  .source-line { fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
+  .claude-line { stroke:#D97757; }
+  .codex-line { stroke:#10A37F; }
+  .other-line { stroke:#BF5AF2; }
+  .source-legends { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-top:7px; }
+  .source-legend { display:grid; grid-template-columns:auto 1fr auto; align-items:baseline; gap:5px; padding:7px 8px; border-radius:11px; background:rgba(120,120,128,.13); font-size:9px; }
+  .source-legend span::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%%; }
+  .source-legend b { text-align:right; font-size:10px; font-variant-numeric:tabular-nums; }
+  .source-legend small { color:var(--sub); }
+  .claude-legend span::before { background:#D97757; }
+  .codex-legend span::before { background:#10A37F; }
+  .free-cloud-legend span::before { background:#30D158; }
+  .local-compute-legend span::before { background:#64D2FF; }
+  .other-legend span::before { background:#BF5AF2; }
+  .source-legend:last-child { grid-column:1 / -1; }
+  .window-tabs { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: rgba(120,120,128,.16); }
+  .window-tabs button { appearance: none; border: 0; border-radius: 10px; height: 31px; color: rgba(235,235,245,.58); background: transparent; font: inherit; font-size: 11px; font-weight: 700; }
+  .window-tabs button.is-active { color: white; background: rgba(120,120,128,.34); box-shadow: 0 1px 5px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.10) inset; }
+  .window-panel { display: none; }
+  .window-panel.is-active { display: block; }
+  .window-hero { display: flex; align-items: baseline; gap: 8px; padding: 13px; border-radius: 17px; background: linear-gradient(145deg,rgba(10,132,255,.24),rgba(100,210,255,.08)); }
+  .window-hero span { color: rgba(235,235,245,.58); font-size: 10px; }
+  .window-hero strong { margin-left: auto; font-size: 24px; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+  .window-hero small { color: rgba(235,235,245,.58); font-size: 10px; }
+  .token-row { padding: 9px 11px; margin-bottom: 6px; border-radius: 14px; background: rgba(120,120,128,.13); }
+  .token-row-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 6px; font-size: 11px; }
+  .token-row-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .token-row-head b { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .token-row-head small { color: rgba(235,235,245,.52); font-weight: 500; }
+  .compute-overview {
+    padding: 16px; border-radius: 24px; border: .5px solid rgba(255,255,255,.13);
+    background: linear-gradient(145deg,rgba(48,209,88,.13),rgba(100,210,255,.05)),var(--card);
+    box-shadow: 0 18px 38px rgba(0,0,0,.14),0 1px 0 rgba(255,255,255,.13) inset;
+  }
+  .compute-lens {
+    overflow: hidden; border-radius: 28px; border: .5px solid rgba(255,255,255,.14);
+    background: linear-gradient(155deg,rgba(48,209,88,.12),rgba(100,210,255,.04) 42%%,rgba(255,255,255,.035)),var(--card);
+    box-shadow: 0 24px 48px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.13) inset;
+  }
+  .compute-lens .compute-overview { border:0; border-radius:0; background:transparent; box-shadow:none; padding-bottom:13px; }
+  .compute-lens .token-overview { border:0; border-radius:0; background:transparent; box-shadow:none; padding:16px; }
+  .lens-divider { height:.5px; margin:0 16px; background:rgba(255,255,255,.12); }
+  .lens-token-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 16px 0; }
+  .lens-token-head span,.lens-token-head strong { display:block; }
+  .lens-token-head span { color:var(--sub); font-size:9px; font-weight:750; letter-spacing:.09em; }
+  .lens-token-head strong { margin-top:2px; font-size:15px; letter-spacing:-.025em; }
+  .lens-detail-link { appearance:none; border:0; border-radius:99px; padding:7px 10px; color:#64D2FF; background:rgba(100,210,255,.11); font:inherit; font-size:10px; font-weight:700; cursor:pointer; }
+  .compute-lens .kpi { padding:9px 10px; }
+  .compute-lens .kpi strong { font-size:20px; }
+  .window-kpi { appearance:none; border:0; color:inherit; text-align:left; font:inherit; cursor:pointer; }
+  .window-kpi:hover { background:rgba(120,120,128,.24); }
+  .window-kpi:focus-visible { box-shadow:0 0 0 3px rgba(10,132,255,.42); outline:0; }
+  .compute-lens .token-kpis { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .compute-lens .source-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .compute-lens .source-chip { min-height:70px; }
+  .other-metric { grid-column:1 / -1; min-height:58px !important; }
+  .claude-metric b { color:#D97757; }
+  .codex-metric b { color:#10A37F; }
+  .free-metric b { color:#30D158; }
+  .local-metric b { color:#64D2FF; }
+  .ledger-actions { display:flex; gap:5px; }
+  .ledger-actions button { appearance:none; border:0; border-radius:99px; padding:6px 9px; color:var(--sub); background:rgba(120,120,128,.18); font:inherit; font-size:9px; font-weight:700; cursor:pointer; }
+  .ledger-actions button:hover { color:var(--text); background:rgba(120,120,128,.28); }
+  .compute-dot { background: #64D2FF; box-shadow: 0 0 0 3px rgba(100,210,255,.14); }
+  .compute-overview .ledger-status { padding-right: 28px; }
+  .compute-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .compute-stat { padding: 11px; border-radius: 15px; background: rgba(120,120,128,.14); }
+  .compute-stat span,.compute-stat strong,.compute-stat small { display: block; }
+  .compute-stat span,.compute-stat small { color: var(--sub); font-size: 10px; }
+  .compute-stat strong { margin: 4px 0 2px; font-size: 20px; letter-spacing: -.045em; }
+  .combined-stat { grid-column: 1/-1; display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .combined-stat span,.combined-stat small { grid-column: 1; }
+  .combined-stat strong { grid-column: 2; grid-row: 1/3; font-size: 24px; }
+  .free-stat strong { color: #30D158; } .local-stat strong { color: #64D2FF; }
+  .compute-ratio { display: flex; height: 7px; margin-top: 11px; overflow: hidden; border-radius: 99px; background: rgba(120,120,128,.2); }
+  .compute-ratio span { height: 100%%; } .free-ratio { background: #30D158; } .local-ratio { background: #64D2FF; }
+  .compute-purpose { display: flex; gap: 8px; align-items: baseline; margin-top: 10px; font-size: 10px; }
+  .compute-purpose span { color: var(--sub); } .compute-purpose b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compute-trust { display:flex; justify-content:space-between; gap:8px; margin-top:9px; font-size:10px; color:var(--sub); }
+  .compute-trust b { color:var(--text); font-weight:650; }
+  .coverage-callout { display:grid; grid-template-columns:1fr auto; align-items:baseline; gap:3px 10px; margin:10px 1px 2px; padding:11px 12px; border-radius:15px; background:rgba(48,209,88,.10); border:1px solid rgba(48,209,88,.18); }
+  .coverage-callout span,.coverage-callout small { color:var(--sub); font-size:10px; }
+  .coverage-callout strong { font-size:17px; font-variant-numeric:tabular-nums; }
+  .coverage-callout small { grid-column:1 / -1; }
+  .fixed-badge { color:var(--sub); font-size:10px; font-weight:700; letter-spacing:.02em; }
+  .dashboard-section.is-fixed .move-controls { visibility:hidden; }
+  .compute-summary div { position: relative; }
+  .compute-summary small { display: block; margin-top: 3px; color: rgba(235,235,245,.52); font-size: 9px; }
+  .key-card { margin-bottom: 7px; border-radius: 15px; background: rgba(120,120,128,.14); overflow: hidden; }
+  .key-card summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 11px; cursor: pointer; }
+  .key-card summary::-webkit-details-marker { display: none; }
+  .key-card summary span,.key-card summary b,.key-card summary small { display: block; }
+  .key-card summary b { font-size: 12px; } .key-card summary small { margin-top: 3px; color: rgba(235,235,245,.52); font-size: 9px; }
+  .key-card summary strong { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .key-card summary::after { content: "⌄"; color: rgba(235,235,245,.52); }
+  .key-card[open] summary::after { content: "⌃"; }
+  .key-body { padding: 0 11px 11px; border-top: .5px solid rgba(255,255,255,.08); }
+  .key-sources { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 9px; }
+  .key-source { padding: 4px 7px; border-radius: 99px; color: rgba(235,235,245,.70); background: rgba(120,120,128,.22); font-size: 9px; }
+  .key-body h4 { margin: 10px 0 5px; color: rgba(235,235,245,.52); font-size: 10px; }
+  .key-body ul { list-style: none; margin: 0; padding: 0; }
+  .key-body li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; color: rgba(235,235,245,.72); font-size: 10px; border-bottom: .5px solid rgba(255,255,255,.06); }
   .card-head {
     display: flex;
     align-items: center;
@@ -1014,51 +2331,71 @@ local function buildHTML(s)
     color: var(--sub);
     margin-top: 2px;
   }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    html, body { background: Canvas; }
+    .shell, .ledger-overview, .card, .radar, .hero-loaders {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+      background: Canvas !important;
+    }
+  }
 </style>
 </head>
 <body>
   <div class="shell%s">
     <div class="top">
-      <div class="title">NexStatus<span>儀表板</span></div>
-      <div class="stamp">%s<br/><span style="opacity:.8">%s · %s · 透%d%%</span></div>
+      <div class="title">NexStatus<span>成本中心</span></div>
+      <div class="top-actions">
+        <button type="button" class="top-button" data-action="toggle-density" aria-label="切換顯示密度">%s</button>
+        <button type="button" class="top-button" data-sheet-open="layout" aria-label="編輯排序">編輯</button>
+      </div>
     </div>
+    <div class="stamp">%s · %s · %s · 透%d%%</div>
 
     <div class="data">
       %s
-      %s
-      <div class="list">
-        %s
-      </div>
     </div>
 
     <div class="customize">
-      <div class="customize-head">客製化 · 直接在此面板切換（無需另開視窗）</div>
-      <div class="toolbar">
-        <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
-        <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
-        <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
-        <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
-      </div>
-      <div class="lab">
-        <div class="lab-row">
-          <span>透明度</span>
-          <a class="step" href="#" data-action="opacity-down">−</a>
-          <span class="lab-val">%d%%</span>
-          <a class="step" href="#" data-action="opacity-up">+</a>
+      <details class="appearance">
+        <summary>外觀與顯示</summary>
+        <div class="appearance-body">
+          <div class="toolbar">
+            <a class="pill" href="#" data-action="cycle-chart">圖表：%s</a>
+            <a class="pill" href="#" data-action="cycle-theme">主題：%s</a>
+            <a class="pill" href="#" data-action="cycle-glass">玻璃：%s</a>
+            <a class="pill" href="#" data-action="toggle-radar">雷達：%s</a>
+            <a class="pill" href="#" data-action="reset-layout">重設排序</a>
+          </div>
+          <div class="lab">
+            <div class="lab-row">
+              <span>透明度</span>
+              <a class="step" href="#" data-action="opacity-down" aria-label="降低透明度">−</a>
+              <span class="lab-val">%d%%</span>
+              <a class="step" href="#" data-action="opacity-up" aria-label="提高透明度">+</a>
+            </div>
+            <div class="lab-row">
+              <span>模糊</span>
+              <a class="step" href="#" data-action="blur-down" aria-label="降低模糊">−</a>
+              <span class="lab-val">%d</span>
+              <a class="step" href="#" data-action="blur-up" aria-label="提高模糊">+</a>
+            </div>
+            <div class="lab-row">
+              <span>飽和</span>
+              <a class="step" href="#" data-action="sat-down" aria-label="降低飽和度">−</a>
+              <span class="lab-val">%d</span>
+              <a class="step" href="#" data-action="sat-up" aria-label="提高飽和度">+</a>
+            </div>
+          </div>
         </div>
-        <div class="lab-row">
-          <span>模糊</span>
-          <a class="step" href="#" data-action="blur-down">−</a>
-          <span class="lab-val">%d</span>
-          <a class="step" href="#" data-action="blur-up">+</a>
-        </div>
-        <div class="lab-row">
-          <span>飽和</span>
-          <a class="step" href="#" data-action="sat-down">−</a>
-          <span class="lab-val">%d</span>
-          <a class="step" href="#" data-action="sat-up">+</a>
-        </div>
-      </div>
+      </details>
       <div class="actions">
         <a class="btn primary" href="#" data-action="refresh">重新整理</a>
         <a class="btn" href="#" data-action="close">關閉</a>
@@ -1066,6 +2403,7 @@ local function buildHTML(s)
       </div>
     </div>
   </div>
+  %s
   <script>
     function sendAction(action) {
       try {
@@ -1076,7 +2414,62 @@ local function buildHTML(s)
       } catch (e) {}
       document.title = "NEX|" + action + "|" + Date.now();
     }
+    var suppressSortClick = false;
     document.addEventListener("click", function (e) {
+      var actionBtn = e.target.closest && e.target.closest("[data-action]");
+      if (actionBtn && actionBtn.getAttribute("data-action")) {
+        e.preventDefault();
+        e.stopPropagation();
+        sendAction(actionBtn.getAttribute("data-action"));
+        return;
+      }
+      if (e.target.closest && e.target.closest("[data-sort-grip]")) {
+        e.preventDefault(); e.stopPropagation(); return;
+      }
+      var opener = e.target.closest && e.target.closest("[data-sheet-open]");
+      var closer = e.target.closest && e.target.closest("[data-sheet-close]");
+      if (opener) {
+        if (suppressSortClick) {
+          e.preventDefault(); e.stopPropagation(); return;
+        }
+        e.preventDefault();
+        var sheetName = opener.getAttribute("data-sheet-open");
+        var sheet = document.getElementById(sheetName + "-sheet");
+        if (!sheet) return;
+        document.querySelectorAll(".detail-sheet").forEach(function (item) { item.setAttribute("aria-hidden", "true"); });
+        document.querySelectorAll(".sheet-backdrop").forEach(function (item) { item.setAttribute("aria-hidden", "true"); });
+        document.body.classList.add("sheet-open");
+        sheet.setAttribute("aria-hidden", "false");
+        document.querySelector('[data-sheet-close="' + sheetName + '"].sheet-backdrop').setAttribute("aria-hidden", "false");
+        var requestedWindow = opener.getAttribute("data-window-target");
+        if (requestedWindow) {
+          document.querySelectorAll("[data-window]").forEach(function (button) {
+            button.classList.toggle("is-active", button.getAttribute("data-window") === requestedWindow);
+          });
+          document.querySelectorAll("[data-window-panel]").forEach(function (view) {
+            view.classList.toggle("is-active", view.getAttribute("data-window-panel") === requestedWindow);
+          });
+        }
+        return;
+      }
+      if (closer) {
+        e.preventDefault();
+        document.body.classList.remove("sheet-open");
+        document.querySelectorAll(".detail-sheet,.sheet-backdrop").forEach(function (item) { item.setAttribute("aria-hidden", "true"); });
+        return;
+      }
+      var windowButton = e.target.closest && e.target.closest("[data-window]");
+      if (windowButton) {
+        e.preventDefault();
+        var selected = windowButton.getAttribute("data-window");
+        document.querySelectorAll("[data-window]").forEach(function (button) {
+          button.classList.toggle("is-active", button === windowButton);
+        });
+        document.querySelectorAll("[data-window-panel]").forEach(function (view) {
+          view.classList.toggle("is-active", view.getAttribute("data-window-panel") === selected);
+        });
+        return;
+      }
       var t = e.target;
       while (t && !(t.getAttribute && t.getAttribute("data-action"))) {
         t = t.parentElement;
@@ -1086,21 +2479,143 @@ local function buildHTML(s)
       e.stopPropagation();
       sendAction(t.getAttribute("data-action"));
     }, true);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && document.body.classList.contains("sheet-open")) {
+        document.body.classList.remove("sheet-open");
+        document.querySelectorAll(".detail-sheet,.sheet-backdrop").forEach(function (item) { item.setAttribute("aria-hidden", "true"); });
+      }
+      if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-sheet-open]")) {
+        e.preventDefault(); e.target.click();
+      }
+    });
+    /* ---- Sort sheet only: large rows, ↑↓ or ☰ drag ---- */
+    (function setupSortSheet() {
+      var active = null, moved = false, startY = 0, offsetY = 0;
+      var list = null, placeholder = null, lastKey = null;
+
+      function movableRows(parent) {
+        return Array.from(parent.children).filter(function (n) {
+          return n.classList && n.classList.contains("sort-row") && !n.classList.contains("is-fixed") && n !== placeholder;
+        });
+      }
+
+      function commitList(parent) {
+        if (!parent) return;
+        var group = parent.getAttribute("data-sort-list");
+        if (!group) return;
+        var ids = Array.from(parent.querySelectorAll(".sort-row"))
+          .map(function (n) { return n.getAttribute("data-sort-id"); })
+          .filter(Boolean);
+        if (group === "sections") sendAction("order-soft:" + ids.join(","));
+        else sendAction("tiles-soft:" + group + ":" + ids.join(","));
+        suppressSortClick = true;
+        setTimeout(function () { suppressSortClick = false; }, 280);
+      }
+
+      function placeAt(clientY) {
+        if (!active || !placeholder || !list) return;
+        var rows = movableRows(list);
+        var insertBefore = null;
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i] === active) continue;
+          var r = rows[i].getBoundingClientRect();
+          if (clientY < r.top + r.height / 2) { insertBefore = rows[i]; break; }
+        }
+        // Keep fixed rows (e.g. compute) pinned at top
+        var fixed = list.querySelector(".sort-row.is-fixed");
+        if (!insertBefore) {
+          list.appendChild(placeholder);
+        } else if (fixed && insertBefore === fixed) {
+          list.insertBefore(placeholder, fixed.nextSibling);
+        } else {
+          list.insertBefore(placeholder, insertBefore);
+        }
+        var key = insertBefore ? insertBefore.getAttribute("data-sort-id") : "end";
+        if (key === lastKey) return;
+        lastKey = key;
+      }
+
+      function beginDrag(row, e) {
+        var rect = row.getBoundingClientRect();
+        list = row.parentNode;
+        active = row;
+        moved = true;
+        lastKey = null;
+        offsetY = e.clientY - rect.top;
+        placeholder = document.createElement("div");
+        placeholder.className = "sort-placeholder";
+        placeholder.style.height = rect.height + "px";
+        list.insertBefore(placeholder, row);
+        row.classList.add("is-dragging");
+        row.style.position = "fixed";
+        row.style.left = rect.left + "px";
+        row.style.top = rect.top + "px";
+        row.style.width = rect.width + "px";
+        row.style.zIndex = "120";
+        row.style.pointerEvents = "none";
+        document.body.appendChild(row);
+      }
+
+      function onMove(e) {
+        if (!active) return;
+        if (!moved) {
+          if (Math.abs(e.clientY - startY) < 5) return;
+          beginDrag(active, e);
+        }
+        e.preventDefault();
+        active.style.top = (e.clientY - offsetY) + "px";
+        placeAt(e.clientY);
+      }
+
+      function onUp(e) {
+        if (!active) return;
+        document.removeEventListener("pointermove", onMove, true);
+        document.removeEventListener("pointerup", onUp, true);
+        document.removeEventListener("pointercancel", onUp, true);
+        try { e.target && e.target.releasePointerCapture && e.target.releasePointerCapture(e.pointerId); } catch (err) {}
+        if (moved && placeholder && list) {
+          list.insertBefore(active, placeholder);
+          placeholder.remove();
+          active.classList.remove("is-dragging");
+          active.style.position = active.style.left = active.style.top = active.style.width = active.style.zIndex = active.style.pointerEvents = "";
+          commitList(list);
+        } else if (active) {
+          active.classList.remove("is-dragging");
+        }
+        active = null; moved = false; list = null; placeholder = null; lastKey = null;
+      }
+
+      document.querySelectorAll("[data-sort-grip]").forEach(function (grip) {
+        grip.addEventListener("pointerdown", function (e) {
+          if (e.button !== undefined && e.button !== 0) return;
+          var row = grip.closest(".sort-row");
+          if (!row || row.classList.contains("is-fixed")) return;
+          e.preventDefault(); e.stopPropagation();
+          active = row; moved = false; startY = e.clientY;
+          try { grip.setPointerCapture(e.pointerId); } catch (err) {}
+          document.addEventListener("pointermove", onMove, true);
+          document.addEventListener("pointerup", onUp, true);
+          document.addEventListener("pointercancel", onUp, true);
+        });
+        grip.addEventListener("dragstart", function (e) { e.preventDefault(); });
+      });
+    })();
   </script>
 </body>
 </html>]],
     th.color_scheme, bgCss, cardCss, th.border, th.muted, th.text, th.sub, th.track, th.blue, th.glow1, th.glow2,
     blur, sat,
     auroraCSS,
-    (prefs.theme == "aurora") and " aurora" or "",
+    ((prefs.theme == "aurora") and " aurora" or "") ..
+      ((prefs.density == "compact") and " is-compact" or ""),
+    prefs.density == "compact" and "展開" or "精簡",
     esc(updated), esc(chartLabel), esc(themeLabel), math.floor(op * 100 + 0.5),
     -- data zone
-    radar,
-    hero,
-    cards,
+    orderedSections,
     -- customize zone
     esc(chartLabel), esc(themeLabel), esc(gLabel), prefs.radar and "開" or "關",
-    math.floor(op * 100 + 0.5), blur, sat
+    math.floor(op * 100 + 0.5), blur, sat,
+    detailSheets
   )
 end
 
@@ -1124,18 +2639,86 @@ end
 -- MenuBar open-click is outside the panel; ignore outside-dismiss briefly after show.
 local suppressOutsideUntil = 0
 
-local function redrawPanel()
+redrawPanel = function()
   if panel then panel:html(buildHTML(readSnapshot())) end
 end
 
 local function handleAction(action)
   if type(action) ~= "string" then return end
-  action = action:gsub("^/*", ""):gsub("[?#].*$", "")
+  action = action:gsub("^/*", ""):gsub("[?#|].*$", "")
+
+  local moveId, moveDirection = action:match("^move:([a-z_]+):([a-z]+)$")
+  if moveDirection ~= "up" and moveDirection ~= "down" then moveId, moveDirection = nil, nil end
+  local orderPayload = action:match("^order:([a-z_,]+)$")
+  local softTile = false
+  local tileGroup, tilePayload = action:match("^tiles%-soft:([a-z_]+):([a-z0-9_,]+)$")
+  if tileGroup then
+    softTile = true
+  else
+    tileGroup, tilePayload = action:match("^tiles:([a-z_]+):([a-z0-9_,]+)$")
+  end
+  local softOrder = false
+  if not orderPayload then
+    orderPayload = action:match("^order%-soft:([a-z_,]+)$")
+    if orderPayload then softOrder = true end
+  end
+
+  if tileGroup and tilePayload then
+    local allowed = TILE_ORDER_DEFAULTS[tileGroup]
+    local prefsKey = tilePrefsKey(tileGroup)
+    if allowed and prefsKey then
+      local proposed = {}
+      for id in tilePayload:gmatch("[a-z0-9_]+") do table.insert(proposed, id) end
+      local normalized = normalizedTileOrder(tileGroup, proposed)
+      if #proposed == #allowed then
+        local valid = true
+        for index, id in ipairs(normalized) do
+          if id ~= proposed[index] then valid = false; break end
+        end
+        if valid then
+          prefs[prefsKey] = normalized
+          savePrefs()
+          if not softTile then redrawPanel() end
+        end
+      end
+    end
+    return
+  elseif orderPayload then
+    local proposed = {}
+    for id in orderPayload:gmatch("[a-z_]+") do table.insert(proposed, id) end
+    local normalized = normalizedSectionOrder(proposed)
+    -- Reject partial, duplicate or unknown payloads instead of silently
+    -- granting a variable bridge command broader meaning.
+    if #proposed == #SECTION_ORDER then
+      local valid = true
+      for index, id in ipairs(normalized) do
+        if id ~= proposed[index] then valid = false; break end
+      end
+      if valid then
+        prefs.section_order = normalized
+        savePrefs()
+        if not softOrder then redrawPanel() end
+      end
+    end
+    return
+  elseif moveId then
+    local order = normalizedSectionOrder(prefs.section_order)
+    if moveId == "compute" then return end
+    for index, id in ipairs(order) do
+      if id == moveId then
+        local other = moveDirection == "up" and index - 1 or index + 1
+        if other >= 2 and other <= #order then order[index], order[other] = order[other], order[index] end
+        break
+      end
+    end
+    prefs.section_order = order
+    savePrefs()
+    redrawPanel()
+    return
+  end
 
   if action == "refresh" then
     refreshSnapshot(true)
-    redrawPanel()
-    M.refreshTitleOnly()
   elseif action == "cycle-chart" then
     prefs.chart = cycleList(CHART_ORDER, prefs.chart)
     savePrefs()
@@ -1152,6 +2735,21 @@ local function handleAction(action)
     redrawPanel()
   elseif action == "toggle-radar" then
     prefs.radar = not prefs.radar
+    savePrefs()
+    redrawPanel()
+  elseif action == "toggle-density" then
+    prefs.density = prefs.density == "compact" and "comfortable" or "compact"
+    savePrefs()
+    redrawPanel()
+  elseif action == "layout-done" then
+    -- Apply soft-saved order to the main dashboard and close the sheet.
+    redrawPanel()
+  elseif action == "reset-layout" then
+    prefs.section_order = normalizedSectionOrder(SECTION_ORDER)
+    prefs.token_kpi_order = normalizedTileOrder("token_kpis", TILE_ORDER_DEFAULTS.token_kpis)
+    prefs.token_source_order = normalizedTileOrder("token_sources", TILE_ORDER_DEFAULTS.token_sources)
+    prefs.provider_order = normalizedTileOrder("providers", TILE_ORDER_DEFAULTS.providers)
+    prefs.edit_layout = false
     savePrefs()
     redrawPanel()
   elseif action == "opacity-up" then
@@ -1278,14 +2876,72 @@ local function togglePanel()
   end
 end
 
+function M.show()
+  showPanel()
+end
+
+function M.hide()
+  hidePanel()
+end
+
 -- Public: open control panel (for debugging / scripts)
 function M.openPanel()
   showPanel()
 end
 
 
-function M.refreshTitleOnly()
+local function applyMenubarIcon()
   if not item then return end
+  -- Template bars icon: still visible when title text is painted wrong / truncated
+  local iconPath = hs.configdir .. "/assets/nexstatus-menubar-template.png"
+  local img = hs.image.imageFromPath(iconPath)
+  if img then
+    pcall(function()
+      img = img:setSize({ w = 18, h = 18 })
+      img:setTemplate(true)
+      item:setIcon(img)
+    end)
+  end
+end
+
+local function ensureMenubarItem()
+  -- Tahoe / crowded MenuBar: dead hs.menubar refs leave no visible item while
+  -- the module still thinks it is running. Always recreate when missing.
+  if item then
+    local ok = pcall(function()
+      item:setTitle(item:title() or " NS ")
+    end)
+    if ok then
+      applyMenubarIcon()
+      return true
+    end
+    pcall(function() item:delete() end)
+    item = nil
+  end
+  item = hs.menubar.new(true)
+  if not item then
+    hs.printf("[nexstatus] failed to create menubar item")
+    return false
+  end
+  _G.NexStatusMenuBar = item
+  pcall(function() item:setMenu(nil) end)
+  -- Prefer displaying near the right (clock side) when supported
+  pcall(function()
+    if item.priority then item:priority(0) end
+  end)
+  item:setClickCallback(function()
+    hs.printf("[nexstatus] menubar clicked → toggle dashboard")
+    togglePanel()
+  end)
+  applyMenubarIcon()
+  -- Short placeholder — long titles get crushed off-screen on crowded bars
+  item:setTitle(" NS ")
+  item:setTooltip("NexStatus — loading…")
+  return true
+end
+
+function M.refreshTitleOnly()
+  if not ensureMenubarItem() then return end
   local s = readSnapshot() or {}
   local host = s.host or {}
   local cl = s.claude or {}
@@ -1293,7 +2949,7 @@ function M.refreshTitleOnly()
   local go = s.opencode_go or {}
   local gk = s.grok or {}
 
-  -- Main bar: C=Claude · G=Code/Codex · K=Grok  →  e.g. C70% G49% K8%
+  -- Main bar: C=Claude · G=Code/Codex · K=Grok · A=Antigravity
   local function chip(letter, ok, val)
     if not ok or val == nil then
       return letter .. "—%"
@@ -1301,11 +2957,15 @@ function M.refreshTitleOnly()
     return string.format("%s%d%%", letter, tonumber(val) or 0)
   end
 
+  local ag = s.antigravity or {}
   local parts = {
     chip("C", cl.ok, cl.five_hour_pct),
     chip("G", cx.ok, cx.five_hour_pct),
     chip("K", gk.ok, gk.used_pct),
   }
+  if ag.ok then
+    table.insert(parts, chip("A", true, ag.used_pct or ag.session_used_pct))
+  end
 
   -- Optional memory chip when swap is active or RAM is tight
   local mem = tonumber(host.mem_pct)
@@ -1315,33 +2975,59 @@ function M.refreshTitleOnly()
     table.insert(parts, string.format("M%d%%", mem))
   end
 
-  -- Force uppercase chips only (C70% G49% K10% M8%) — never lowercase
-  local title = table.concat(parts, " "):upper()
-  local pr = pressureFromSnapshot(s)
-  if pr.score >= 90 then
-    title = "⚡" .. title
-  elseif pr.score >= 75 then
-    title = "!" .. title
+  -- Compact title: long "C88% G100% K19% A3% M29%" is often clipped/invisible
+  -- on crowded Tahoe MenuBars. Keep NS + short numbers; full detail in tooltip.
+  local function short(ok, val)
+    if not ok or val == nil then return "—" end
+    return tostring(tonumber(val) or 0)
   end
+  local body = string.format(
+    "C%s G%s K%s",
+    short(cl.ok, cl.five_hour_pct),
+    short(cx.ok, cx.five_hour_pct),
+    short(gk.ok, gk.used_pct)
+  )
+  if ag.ok then
+    body = body .. " A" .. short(true, ag.used_pct or ag.session_used_pct)
+  end
+  if showMem and mem ~= nil then
+    body = body .. " M" .. tostring(mem)
+  end
+  local pr = pressureFromSnapshot(s)
+  -- The menu bar is a glanceable entry point, not a second dashboard. Keep
+  -- provider percentages in the tooltip/panel so crowded macOS menu bars stay calm.
+  local function menuPct(ok, value)
+    if not ok or value == nil then return "—" end
+    return tostring(math.floor((tonumber(value) or 0) + .5)) .. "%"
+  end
+  local pressureLabel = (pr.score >= 80 and "P!" or "P") .. tostring(math.floor(pr.score + .5)) .. "%"
+  local title = string.format("C%s G%s %s", menuPct(cl.ok, cl.five_hour_pct), menuPct(cx.ok, cx.five_hour_pct), pressureLabel)
   local tip = string.format(
-    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下開啟儀表板：上方資料、下方直接客製化",
+    "NexStatus\n壓力雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nA = Antigravity %s (%s)\nOpenCode Go %s · MEM %s · Swap %.0f MB\n點一下開啟儀表板",
     pr.score,
     pr.weather,
     pctText(cl.five_hour_pct),
     pctText(cx.five_hour_pct),
     pctText(gk.used_pct),
+    pctText(ag.used_pct or ag.session_used_pct),
+    tostring(ag.plan or "—"),
     pctText(go.used_pct),
     pctText(mem),
     swap
   )
 
-  item:setTitle(" " .. title .. " ")
-  item:setTooltip(tip)
+  applyMenubarIcon()
+  pcall(function()
+    item:setTitle(" " .. title .. " ")
+    item:setTooltip(tip)
+  end)
 end
 
 function M.refresh()
-  if not item then return end
+  if not ensureMenubarItem() then return end
   refreshSnapshot(false)
+  -- Paint the current snapshot immediately; the async collector repaints only
+  -- after a successful atomic refresh.
   M.refreshTitleOnly()
   -- Live-update open panel
   if panel and panel:hswindow() and panel:hswindow():isVisible() then
@@ -1350,40 +3036,51 @@ function M.refresh()
 end
 
 function M.start()
-  if item then return end
-  -- Always rebuild panel so bridge matches this code version
+  -- Hard reset menubar so a dead item never blocks re-registration
+  if item then
+    pcall(function() item:delete() end)
+    item = nil
+  end
   if panel then
     pcall(function() panel:delete() end)
     panel = nil
   end
-
-  item = hs.menubar.new(true)
-  if not item then
-    hs.printf("[nexstatus] failed to create menubar")
-    return
+  if timer then
+    pcall(function() timer:stop() end)
+    timer = nil
   end
-
-  -- Critical: no setMenu — a menu steals the click and user never sees the dashboard.
-  pcall(function() item:setMenu(nil) end)
-
-  -- Click MenuBar title chips → toggle the one tall data dashboard
-  item:setClickCallback(function()
-    hs.printf("[nexstatus] menubar clicked → toggle dashboard")
-    togglePanel()
-  end)
-
-  -- Warm snapshot so first open is instant
-  pcall(function() refreshSnapshot(false) end)
-  M.refresh()
-  timer = hs.timer.doEvery(15, function()
-    M.refresh()
-  end)
-
-  -- Click outside panel to dismiss — but never on the open-click itself
   if M._tap then
     pcall(function() M._tap:stop() end)
     M._tap = nil
   end
+  if M._watch then
+    pcall(function() M._watch:stop() end)
+    M._watch = nil
+  end
+
+  if not ensureMenubarItem() then
+    return
+  end
+
+  -- Warm snapshot so first open is instant
+  pcall(function() refreshSnapshot(false) end)
+  M.refreshTitleOnly()
+  timer = hs.timer.doEvery(15, function()
+    M.refresh()
+  end)
+
+  -- Watchdog: if MenuBar item disappears, recreate (every 30s)
+  M._watch = hs.timer.doEvery(30, function()
+    if not ensureMenubarItem() then return end
+    -- If title somehow empty, force refresh
+    local t = nil
+    pcall(function() t = item:title() end)
+    if type(t) ~= "string" or t:match("%S") == nil or t:find("NS") == nil then
+      M.refreshTitleOnly()
+    end
+  end)
+
+  -- Click outside panel to dismiss — but never on the open-click itself
   M._tap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(_e)
     if hs.timer.secondsSinceEpoch() < suppressOutsideUntil then
       return false
@@ -1411,11 +3108,21 @@ function M.start()
   end)
   M._tap:start()
 
-  hs.printf("[nexstatus] NexStatus ready — click MenuBar C%% G%% K%% to open dashboard (root=%s)", ROOT)
+  hs.printf("[nexstatus] NexStatus ready — look for MenuBar title starting with NS (root=%s)", ROOT)
+  hs.alert.show("NexStatus 已上線：找 MenuBar「NS C…%」", 2.2)
 end
 
 function M.stop()
   if timer then timer:stop(); timer = nil end
+  refreshQueued = false
+  if collectorWatchdog then collectorWatchdog:stop(); collectorWatchdog = nil end
+  if collectorTask then
+    pcall(function()
+      if collectorTask:isRunning() then collectorTask:terminate() end
+    end)
+    collectorTask = nil
+  end
+  if M._watch then M._watch:stop(); M._watch = nil end
   if M._tap then M._tap:stop(); M._tap = nil end
   if panel then
     panel:delete()
@@ -1423,6 +3130,11 @@ function M.stop()
   end
   if item then item:delete(); item = nil end
   hs.printf("[nexstatus] NexStatus stopped")
+end
+
+function M.restart()
+  M.stop()
+  M.start()
 end
 
 return M

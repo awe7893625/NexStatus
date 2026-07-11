@@ -7,7 +7,9 @@ No secrets are written to disk (tokens are only used in-memory for API calls).
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -17,6 +19,11 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from nexstatus.ledger import collect_ledger_summary
+except ModuleNotFoundError:  # direct ``python nexstatus/collector.py`` execution
+    from ledger import collect_ledger_summary
 
 CACHE_DIR = Path(os.environ.get("NEXSTATUS_CACHE", os.path.expanduser("~/.cache/nexstatus")))
 OUT = CACHE_DIR / "status.json"
@@ -38,10 +45,79 @@ GO_TTL_CAPPED = 15 * 60  # when already at limit, probe less often
 GO_CAP_5H_USD = 12.0
 GO_CAP_WEEK_USD = 30.0
 GO_CAP_MONTH_USD = 60.0
+AGY_CACHE = CACHE_DIR / "antigravity.json"
+AGY_TTL = 60  # local LS probe is cheap; still avoid hammering
+AGY_RPC = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+AGY_MAX_PORTS = 4
+AGY_MAX_MODELS = 12
+AGY_MAX_RESPONSE_BYTES = 256 * 1024
+AGY_TOTAL_DEADLINE = 4.0
+KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE)
 
 
 def _now() -> float:
     return time.time()
+
+
+def _safe_error(value: Any, fallback: str = "source_unavailable") -> str:
+    """Return a short error label without paths, URLs, or response bodies."""
+    if not value:
+        return fallback
+    text = str(value)
+    if "HTTP " in text:
+        match = re.search(r"HTTP\s+(\d{3})", text)
+        return f"HTTP {match.group(1)}" if match else fallback
+    if isinstance(value, urllib.error.URLError):
+        return "network_unavailable"
+    if isinstance(value, TimeoutError):
+        return "source_timeout"
+    return fallback
+
+
+def _ensure_cache_dir() -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(CACHE_DIR, 0o700)
+    for path in KNOWN_CACHE_FILES:
+        try:
+            if path.parent == CACHE_DIR and path.is_file():
+                os.chmod(path, 0o600)
+        except OSError:
+            continue
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _write_cache_json(path: Path, value: dict[str, Any]) -> None:
+    """Atomically write one known cache file with owner-only permissions."""
+    if path.parent != CACHE_DIR or path not in KNOWN_CACHE_FILES:
+        raise ValueError("unsupported_cache_path")
+    _ensure_cache_dir()
+    temp_path = CACHE_DIR / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temp_path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(_json_safe(value), stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _pct(v: Any) -> int | None:
@@ -70,7 +146,7 @@ def claude_usage() -> dict[str, Any]:
     for path in (CLAUDE_STATUS, CLAUDE_LEGACY, CLAUDE_TT):
         data = _read_json(path)
         if data:
-            source = str(path)
+            source = "claude-status"
             break
     if not data:
         return {"ok": False, "error": "no status file", "source": None}
@@ -135,7 +211,7 @@ def codex_usage() -> dict[str, Any]:
             secondary = rl.get("secondary") if isinstance(rl.get("secondary"), dict) else {}
             return {
                 "ok": True,
-                "source": str(path),
+                "source": "codex-session",
                 "five_hour_pct": _pct(primary.get("used_percent")),
                 "seven_day_pct": _pct(secondary.get("used_percent")),
                 "five_hour_resets_at": primary.get("resets_at"),
@@ -201,8 +277,8 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return {"ok": False, "error": f"HTTP {e.code}"}
-    except Exception as e:  # noqa: BLE001 — surface any network failure cleanly
-        return {"ok": False, "error": str(e)[:120]}
+    except Exception as e:  # noqa: BLE001 — optional provider isolation
+        return {"ok": False, "error": _safe_error(e)}
 
     cfg = body.get("config") if isinstance(body.get("config"), dict) else body
     used = _money_val(cfg.get("used"))
@@ -225,8 +301,7 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         "_fetched_at_ts": _now(),
     }
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        GROK_CACHE.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_cache_json(GROK_CACHE, result)
     except OSError:
         pass
     return result
@@ -326,8 +401,8 @@ def _go_local_ledger() -> dict[str, Any]:
             "shadow_usd_30d": round(s30, 4),
             "top_models_30d": [{"model": m, "count": c} for m, c in tops],
         }
-    except Exception as e:  # noqa: BLE001
-        empty["error"] = str(e)[:100]
+    except Exception:  # noqa: BLE001
+        empty["error"] = "ledger_unavailable"
         return empty
 
 
@@ -466,10 +541,10 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
                     pass
         else:
             live_status = "error"
-            message = f"HTTP {e.code}: {text[:120]}"
+            message = f"HTTP {e.code}"
     except Exception as e:  # noqa: BLE001
         live_status = "error"
-        message = str(e)[:120]
+        message = _safe_error(e)
 
     result = {
         "ok": live_status in ("ok", "capped"),
@@ -491,8 +566,7 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
         "_fetched_at_ts": _now(),
     }
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        GO_CACHE.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_cache_json(GO_CACHE, result)
     except OSError:
         pass
     return result
@@ -624,24 +698,289 @@ def _mem_info() -> dict[str, Any]:
     }
 
 
+def _remaining(deadline: float, maximum: float) -> float:
+    return max(0.05, min(maximum, deadline - time.monotonic()))
+
+
+def _verified_agy_pids(deadline: float) -> list[str]:
+    """Return a bounded list of same-user processes whose exact command is agy."""
+    try:
+        pids = subprocess.check_output(
+            ["/usr/bin/pgrep", "-x", "agy"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=_remaining(deadline, 1.0),
+        ).split()[:AGY_MAX_PORTS]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    verified: list[str] = []
+    for pid in pids:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            output = subprocess.check_output(
+                ["/bin/ps", "-p", pid, "-o", "uid=", "-o", "comm="],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_remaining(deadline, 0.6),
+            ).strip()
+            uid_text, command = output.split(maxsplit=1)
+            if int(uid_text) == os.getuid() and Path(command).name == "agy":
+                verified.append(pid)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    return verified
+
+
+def _find_agy_listen_ports(deadline: float) -> list[int]:
+    """Find bounded loopback listeners owned by a verified local agy process."""
+    ports: list[int] = []
+    for pid in _verified_agy_pids(deadline):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            output = subprocess.check_output(
+                [
+                    "/usr/sbin/lsof",
+                    "-nP",
+                    "-a",
+                    "-p",
+                    pid,
+                    "-iTCP",
+                    "-sTCP:LISTEN",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_remaining(deadline, 0.8),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in output.splitlines():
+            if "127.0.0.1:" not in line or "LISTEN" not in line:
+                continue
+            try:
+                port = int(line.split("127.0.0.1:", 1)[1].split()[0].split("->", 1)[0])
+            except (ValueError, IndexError):
+                continue
+            if 1024 <= port <= 65535 and port not in ports:
+                ports.append(port)
+                if len(ports) >= AGY_MAX_PORTS:
+                    return ports
+    return ports
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non_standard_json:{value}")
+
+
+def _probe_agy_user_status(port: int, deadline: float) -> dict[str, Any] | None:
+    """Read a bounded status response from a verified local Antigravity endpoint."""
+    url = f"http://127.0.0.1:{port}{AGY_RPC}"
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+            "User-Agent": "nexstatus/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_remaining(deadline, 1.0)) as resp:
+            chunks: list[bytes] = []
+            total = 0
+            while total <= AGY_MAX_RESPONSE_BYTES:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("agy_deadline")
+                chunk = resp.read(min(8192, AGY_MAX_RESPONSE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > AGY_MAX_RESPONSE_BYTES:
+                return None
+            body = json.loads(
+                b"".join(chunks).decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+            if isinstance(body, dict) and (
+                "userStatus" in body or "planStatus" in body
+            ):
+                return body
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def antigravity_usage(force: bool = False) -> dict[str, Any]:
+    """Antigravity CLI subscription quota via local language server GetUserStatus.
+
+    Requires a running `agy` session (CLI keeps LS on 127.0.0.1).
+    Remote cloudcode-pa quota APIs are often PERMISSION_DENIED for CLI accounts;
+    local probe is the supported path (same approach as CodexBar).
+    """
+    if not force and AGY_CACHE.exists():
+        try:
+            cached = json.loads(AGY_CACHE.read_text(encoding="utf-8"))
+            if _now() - float(cached.get("_fetched_at_ts", 0)) < AGY_TTL:
+                return cached
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    deadline = time.monotonic() + AGY_TOTAL_DEADLINE
+    ports = _find_agy_listen_ports(deadline)
+    if not ports:
+        result = {
+            "ok": False,
+            "error": "agy 未執行 — 開 Antigravity CLI 後會顯示用量",
+            "hint": "local language server (GetUserStatus) only while agy is running",
+        }
+        return result
+
+    body = None
+    for port in ports:
+        if time.monotonic() >= deadline:
+            break
+        body = _probe_agy_user_status(port, deadline)
+        if body:
+            break
+
+    if not body:
+        return {
+            "ok": False,
+            "error": "agy_status_unavailable",
+        }
+
+    us = body.get("userStatus") if isinstance(body.get("userStatus"), dict) else body
+    plan_status = us.get("planStatus") if isinstance(us.get("planStatus"), dict) else {}
+    plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
+    plan_name = str(plan_info.get("planName") or us.get("userTier") or "—")[:80]
+
+    models: list[dict[str, Any]] = []
+    used_pcts: list[int] = []
+    resets: list[str] = []
+    cmcd = us.get("cascadeModelConfigData") if isinstance(us.get("cascadeModelConfigData"), dict) else {}
+    configs = cmcd.get("clientModelConfigs") if isinstance(cmcd.get("clientModelConfigs"), list) else []
+    truncated_models = len(configs) > AGY_MAX_MODELS
+    for cfg in configs[:AGY_MAX_MODELS]:
+        if not isinstance(cfg, dict):
+            continue
+        qi = cfg.get("quotaInfo") if isinstance(cfg.get("quotaInfo"), dict) else {}
+        rem = qi.get("remainingFraction")
+        used_pct = None
+        if isinstance(rem, (int, float)) and math.isfinite(float(rem)):
+            rem = max(0.0, min(1.0, float(rem)))
+            used_pct = max(0, min(100, int(round((1.0 - rem) * 100))))
+            used_pcts.append(used_pct)
+        else:
+            rem = None
+        reset = qi.get("resetTime")
+        if isinstance(reset, str) and reset:
+            resets.append(reset)
+        models.append(
+            {
+                "label": str(cfg.get("label") or cfg.get("modelOrAlias") or "model")[:80],
+                "remaining_fraction": rem,
+                "used_pct": used_pct,
+                "reset_time": reset,
+            }
+        )
+
+    # Primary chip: hottest model window (how full the tightest bucket is)
+    session_used_pct = max(used_pcts) if used_pcts else 0
+    # Credits (monthly pools when present)
+    prompt_monthly = plan_info.get("monthlyPromptCredits")
+    flow_monthly = plan_info.get("monthlyFlowCredits")
+    prompt_avail = plan_status.get("availablePromptCredits")
+    flow_avail = plan_status.get("availableFlowCredits")
+
+    def finite_optional(value: Any) -> float | None:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return None
+        return float(value)
+
+    result = {
+        "ok": True,
+        "source": "agy-local",
+        "plan": plan_name,
+        "used_pct": session_used_pct,  # menubar A##%
+        "session_used_pct": session_used_pct,
+        "models": models,
+        "models_truncated": truncated_models,
+        "prompt_credits_available": finite_optional(prompt_avail),
+        "prompt_credits_monthly": finite_optional(prompt_monthly),
+        "flow_credits_available": finite_optional(flow_avail),
+        "flow_credits_monthly": finite_optional(flow_monthly),
+        "next_reset": min(resets) if resets else None,
+        "_fetched_at": datetime.now(timezone.utc).isoformat(),
+        "_fetched_at_ts": _now(),
+    }
+    try:
+        _write_cache_json(AGY_CACHE, result)
+    except OSError:
+        pass
+    return result
+
+
+def _safe_collect(label: str, function: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Isolate optional collectors so one source cannot abort the snapshot."""
+    try:
+        result = function(*args, **kwargs)
+        return result if isinstance(result, dict) else {"ok": False, "error": f"{label}_invalid"}
+    except Exception:  # noqa: BLE001 — provider boundary must degrade safely
+        return {"ok": False, "error": f"{label}_unavailable"}
+
+
 def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
-    host = host_metrics()
-    claude = claude_usage()
-    codex = codex_usage()
-    grok = grok_usage(force=force_remote)
-    go = opencode_go_usage(force=force_remote)
+    host = _safe_collect("host", host_metrics)
+    claude = _safe_collect("claude", claude_usage)
+    codex = _safe_collect("codex", codex_usage)
+    grok = _safe_collect("grok", grok_usage, force=force_remote)
+    go = _safe_collect("opencode_go", opencode_go_usage, force=force_remote)
+    agy = _safe_collect("antigravity", antigravity_usage, force=force_remote)
+    try:
+        ledger = collect_ledger_summary(COST_DB)
+        if not isinstance(ledger, dict):
+            ledger = {"ok": False, "status": "error", "quality": {"warnings": ["ledger_invalid"]}}
+    except Exception:  # noqa: BLE001 — ledger must never abort the snapshot
+        ledger = {"ok": False, "status": "error", "quality": {"warnings": ["ledger_unavailable"]}}
+
+    # Keep last live ledger if this poll failed (avoid flashing 「格式待升級」).
+    if not ledger.get("ok") and OUT.is_file():
+        try:
+            previous = json.loads(OUT.read_text(encoding="utf-8"))
+            prev_ledger = previous.get("ledger") if isinstance(previous, dict) else None
+            if isinstance(prev_ledger, dict) and prev_ledger.get("ok") is True:
+                carried = dict(prev_ledger)
+                quality = dict(carried.get("quality") or {})
+                warnings = list(quality.get("warnings") or [])
+                warnings.append("ledger_stale_carry")
+                if ledger.get("status"):
+                    warnings.append(f"ledger_poll_{ledger.get('status')}")
+                quality["warnings"] = list(dict.fromkeys(warnings))
+                quality["stale"] = True
+                if quality.get("level") == "ok":
+                    quality["level"] = "warning"
+                carried["quality"] = quality
+                carried["carried_forward"] = True
+                ledger = carried
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
 
     # Compact title pieces for MenuBar
     cl = claude.get("five_hour_pct") if claude.get("ok") else None
     cx = codex.get("five_hour_pct") if codex.get("ok") else None
     go_pct = go.get("used_pct") if go.get("ok") else None
     gk = grok.get("used_pct") if grok.get("ok") else None
+    ag = agy.get("used_pct") if agy.get("ok") else None
     mem = host.get("mem_pct")
 
     def fmt(label: str, v: Any) -> str:
         return f"{label}{v}" if v is not None else f"{label}—"
 
-    # MenuBar: C=Claude G=Codex K=Grok  →  "C70% G49% K8%"  (+ M%% when swap/RAM hot)
+    # MenuBar: C=Claude G=Codex K=Grok A=Antigravity  (+ M%% when swap/RAM hot)
     def chip(letter: str, v: Any) -> str:
         return f"{letter}{v}%" if v is not None else f"{letter}—%"
 
@@ -651,36 +990,41 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
             chip("G", cx),
             chip("Go", go_pct),
             chip("K", gk),
+            chip("A", ag),
             chip("M", mem),
         ]
     )
     title_parts = [chip("C", cl), chip("G", cx), chip("K", gk)]
+    if agy.get("ok"):
+        title_parts.append(chip("A", ag))
     swap_mb = float(host.get("swap_mb") or 0)
     if swap_mb >= 64 or (mem is not None and mem >= 80):
         title_parts.append(chip("M", mem))
     title = " ".join(title_parts).upper()
 
+    generated_at = datetime.now(timezone.utc).isoformat()
     return {
+        "schema_version": 2,
         "ok": True,
         "title": title,
         "title_full": title_full,
-        "polled_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
+        "polled_at": generated_at,
         "polled_at_ts": _now(),
         "host": host,
         "claude": claude,
         "codex": codex,
         "opencode_go": go,
         "grok": grok,
+        "antigravity": agy,
+        "ledger": ledger,
     }
 
 
 def main(argv: list[str]) -> int:
     force = "--force-grok" in argv or "--force-remote" in argv or "--force" in argv
     snap = build_snapshot(force_remote=force)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = OUT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(OUT)
+    _write_cache_json(OUT, snap)
     if "--print" in argv:
         print(json.dumps(snap, ensure_ascii=False, indent=2))
     else:
