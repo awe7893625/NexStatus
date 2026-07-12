@@ -671,6 +671,45 @@ local function fmtReset(ts)
   return string.format("%d 分後", m)
 end
 
+local function fmtResetFull(ts)
+  if type(ts) ~= "number" then return "日期未知" end
+  return os.date("%Y/%m/%d %H:%M", ts) .. "（台北） · " .. fmtReset(ts)
+end
+
+local function fmtIsoReset(value)
+  if type(value) ~= "string" or value == "" then return "日期未知" end
+  return value:gsub("T", " "):gsub("Z$", " UTC")
+end
+
+local function providerUsageSheetHTML(id, title, subtitle, rows, source)
+  local body = ""
+  for _, row in ipairs(rows or {}) do
+    body = body .. string.format([[
+      <div class="usage-window-row">
+        <div><span>%s</span><strong>%s</strong></div>
+        <div class="usage-reset"><span>重置時間</span><b>%s</b></div>
+      </div>
+    ]], esc(row.label or "額度視窗"), esc(row.usage or "—"), esc(row.reset or "日期未知"))
+  end
+  if body == "" then body = '<div class="detail-empty">目前沒有可靠的重置日期；NexStatus 不會猜測。</div>' end
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="usage-%s" aria-hidden="true"></div>
+    <section class="detail-sheet usage-sheet" id="usage-%s-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="usage-%s-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="sheet-head">
+        <div><span>USAGE & RESET</span><h2 id="usage-%s-title">%s</h2></div>
+        <button class="sheet-close" type="button" data-sheet-close="usage-%s" aria-label="關閉 %s 明細">×</button>
+      </header>
+      <p class="usage-subtitle">%s</p>
+      <div class="sheet-scroll usage-scroll">%s
+        <div class="meaning-note">資料來源：%s。時間無可靠證據時顯示未知，不以固定週期推算。</div>
+      </div>
+    </section>
+  ]], esc(id), esc(id), esc(id), esc(id), esc(title), esc(id), esc(title),
+    esc(subtitle or "額度視窗與重置時間"), body, esc(source or "unknown"))
+end
+
 local function barColor(v)
   if v == nil then return "#8E8E93" end
   local th = resolvedTheme()
@@ -860,9 +899,16 @@ local function rowHTML(opts)
       meters = meters .. meterBar(b.label, p, barColor(p))
     end
   end
+  local openAttrs = ""
+  local chevron = ""
+  if opts.usage_sheet ~= false then
+    openAttrs = string.format(' data-sheet-open="usage-%s" tabindex="0" role="button" aria-label="開啟 %s Usage 與重置時間"',
+      esc(opts.id or "unknown"), esc(opts.name or "Usage"))
+    chevron = '<span class="usage-chevron" aria-hidden="true">›</span>'
+  end
 
   return string.format([[
-    <article class="card">
+    <article class="card provider-usage-card"%s>
       <header class="card-head">
         <div class="id">
           <span class="dot" style="background:%s"></span>
@@ -873,14 +919,16 @@ local function rowHTML(opts)
       </header>
       <div class="sub">%s</div>
       %s
+      %s
     </article>
   ]],
+    openAttrs,
     opts.accent or "#0A84FF",
     esc(opts.name),
     opts.badge and ('<span class="badge">' .. esc(opts.badge) .. "</span>") or "",
     esc(opts.main or ""),
     esc(opts.sub or ""),
-    meters
+    meters, chevron
   )
 end
 
@@ -1794,6 +1842,7 @@ local function buildHTML(s)
     }),
     mac = rowHTML({
       id = "mac",
+      usage_sheet = false,
       name = "Mac",
       badge = "Mac",
       accent = "#0A84FF",
@@ -1844,7 +1893,36 @@ local function buildHTML(s)
   for _, id in ipairs(normalizedSectionOrder(prefs.section_order)) do
     orderedSections = orderedSections .. (sections[id] or "")
   end
-  local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s) .. layoutReorderSheetHTML()
+  local goResetAt = type(go.resets_in_sec) == "number" and (os.time() + go.resets_in_sec) or nil
+  local agRows = {}
+  for index, model in ipairs(ag.models or {}) do
+    if index > 8 then break end
+    table.insert(agRows, {
+      label = tostring(model.label or "Antigravity model"),
+      usage = pctText(model.used_pct),
+      reset = fmtIsoReset(model.reset_time),
+    })
+  end
+  if #agRows == 0 and ag.next_reset then
+    table.insert(agRows, { label = "最緊模型視窗", usage = pctText(ag.used_pct), reset = fmtIsoReset(ag.next_reset) })
+  end
+  local providerSheets = providerUsageSheetHTML("claude", "Claude Usage", "5 小時與 7 日訂閱額度", {
+      { label = "5 小時視窗", usage = pctText(cl.five_hour_pct), reset = fmtResetFull(cl.five_hour_resets_at) },
+      { label = "7 日視窗", usage = pctText(cl.seven_day_pct), reset = fmtResetFull(cl.seven_day_resets_at) },
+    }, cl.source)
+    .. providerUsageSheetHTML("codex", "Codex Usage", tostring(cx.plan_type or "plan") .. " 訂閱額度", {
+      { label = "5 小時視窗", usage = pctText(cx.five_hour_pct), reset = fmtResetFull(cx.five_hour_resets_at) },
+      { label = "7 日視窗", usage = pctText(cx.seven_day_pct), reset = fmtResetFull(cx.seven_day_resets_at) },
+    }, cx.source)
+    .. providerUsageSheetHTML("go", "OpenCode Go Usage", tostring(go.limit_name or "官方額度"), {
+      { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
+    }, go.live_status == "capped" and "OpenCode 官方 429" or "本機成本帳估算")
+    .. providerUsageSheetHTML("grok", "Grok Usage", "月額度與 credits", {
+      { label = "月額度", usage = pctText(gk.used_pct), reset = fmtIsoReset(gk.period_end) },
+    }, gk.source)
+    .. providerUsageSheetHTML("antigravity", "Antigravity Usage", "各模型視窗", agRows, ag.source)
+  local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s)
+    .. providerSheets .. layoutReorderSheetHTML()
 
   local themeCards = ""
   for _, tid in ipairs(THEME_ORDER) do
@@ -2671,6 +2749,16 @@ local function buildHTML(s)
   .detail-row b { font-size: 12px; color: var(--text); }
   .detail-row small { margin-top: 3px; color: var(--sub); font-size: 10px; }
   .detail-money { text-align: right; font-variant-numeric: tabular-nums; }
+  .provider-usage-card { position:relative; cursor:pointer; padding-right:34px; }
+  .provider-usage-card:focus-visible { outline:0; box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 40%%,transparent); }
+  .usage-chevron { position:absolute; right:13px; top:50%%; transform:translateY(-50%%); color:var(--sub); font-size:24px; font-weight:300; }
+  .usage-subtitle { margin:8px 2px 12px; color:var(--sub); font-size:11px; }
+  .usage-window-row { display:grid; grid-template-columns:minmax(0,.72fr) minmax(0,1.28fr); gap:10px; margin-bottom:8px; padding:13px; border-radius:16px; background:var(--fill); border:.5px solid var(--hairline); }
+  .usage-window-row span,.usage-window-row strong,.usage-window-row b { display:block; }
+  .usage-window-row span { color:var(--sub); font-size:10px; }
+  .usage-window-row strong { margin-top:5px; font-size:22px; font-variant-numeric:tabular-nums; }
+  .usage-reset { text-align:right; }
+  .usage-reset b { margin-top:5px; font-size:11px; line-height:1.45; font-variant-numeric:tabular-nums; }
   .detail-empty, .meaning-note { padding: 11px; border-radius: 14px; color: var(--sub); background: var(--fill-2); font-size: 11px; line-height: 1.45; }
   .token-dot { background: var(--chart-free); box-shadow: 0 0 0 3px color-mix(in srgb, var(--chart-free) 25%%, transparent); }
   .token-overview .ledger-status { padding-right: 28px; }

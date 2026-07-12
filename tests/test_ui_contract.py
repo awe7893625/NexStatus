@@ -45,6 +45,17 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn('data-window="30d"', self.source)
         self.assertIn('e.key === "Escape"', self.source)
 
+    def test_provider_usage_cards_show_reset_date_and_countdown(self) -> None:
+        self.assertIn('data-sheet-open="usage-%s"', self.source)
+        self.assertIn("Claude Usage", self.source)
+        self.assertIn("Codex Usage", self.source)
+        self.assertIn("OpenCode Go Usage", self.source)
+        self.assertIn("Grok Usage", self.source)
+        self.assertIn("Antigravity Usage", self.source)
+        self.assertIn("fmtResetFull", self.source)
+        self.assertIn("（台北）", self.source)
+        self.assertIn("重置時間", self.source)
+
     def test_secondary_sections_are_reorderable_with_pointer_and_button_fallbacks(self) -> None:
         self.assertIn('data-section-id="%s" draggable="false"', self.source)
         self.assertIn("normalizedSectionOrder", self.source)
