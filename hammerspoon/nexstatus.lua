@@ -3677,16 +3677,9 @@ end
 
 local function applyMenubarIcon()
   if not item then return end
-  -- Template bars icon: still visible when title text is painted wrong / truncated
-  local iconPath = hs.configdir .. "/assets/nexstatus-menubar-template.png"
-  local img = hs.image.imageFromPath(iconPath)
-  if img then
-    pcall(function()
-      img = img:setSize({ w = 18, h = 18 })
-      img:setTemplate(true)
-      item:setIcon(img)
-    end)
-  end
+  -- Keep the item narrow enough to survive crowded/notched menu bars. The
+  -- title already carries C/G/H identity, so a separate 18px icon is redundant.
+  pcall(function() item:setIcon(nil) end)
 end
 
 local function ensureMenubarItem()
@@ -3710,10 +3703,6 @@ local function ensureMenubarItem()
   end
   _G.NexStatusMenuBar = item
   pcall(function() item:setMenu(nil) end)
-  -- Prefer displaying near the right (clock side) when supported
-  pcall(function()
-    if item.priority then item:priority(0) end
-  end)
   item:setClickCallback(function()
     hs.printf("[nexstatus] menubar clicked → toggle dashboard")
     togglePanel()
@@ -3795,7 +3784,7 @@ function M.refreshTitleOnly()
   hostLoad = math.max(0, math.min(100, math.floor(hostLoad + 0.5)))
   local hostLabel = (hostLoad >= 80 and "H!" or "H") .. tostring(hostLoad) .. "%"
   local title = string.format(
-    "C%s G%s %s",
+    "C%sG%s%s",
     menuPct(cl.ok, cl.five_hour_pct),
     menuPct(cx.ok, cx.five_hour_pct),
     hostLabel
@@ -3819,7 +3808,7 @@ function M.refreshTitleOnly()
 
   applyMenubarIcon()
   pcall(function()
-    item:setTitle(" " .. title .. " ")
+    item:setTitle(title)
     item:setTooltip(tip)
   end)
 end
