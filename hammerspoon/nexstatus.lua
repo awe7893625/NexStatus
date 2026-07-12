@@ -3810,7 +3810,10 @@ function M.refreshTitleOnly()
 
   applyMenubarIcon()
   pcall(function()
-    item:setTitle(title)
+    local compactTitle = hs.styledtext.new(title, {
+      font = { name = ".AppleSystemUIFont", size = 10 },
+    })
+    item:setTitle(compactTitle)
     item:setTooltip(tip)
   end)
 end
