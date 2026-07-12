@@ -1400,12 +1400,6 @@ local function tokenSourceLineHTML(points, days, label)
       local y = maxTokens > 0 and (82 - value * 70 / maxTokens) or 82
       table.insert(coords, string.format("%.1f,%.1f", x, y))
     end
-    -- SVG polylines with a single point are invisible. For the Today window,
-    -- extend that one measured value across the chart instead of showing blank.
-    if #coords == 1 then
-      local y = coords[1]:match(",([%d%.%-]+)$") or "82"
-      table.insert(coords, string.format("300.0,%s", y))
-    end
     lines = lines .. string.format('<polyline class="source-line %s" points="%s" />', item.class, table.concat(coords, " "))
     legends = legends .. string.format('<div class="source-legend %s-legend"><span>%s</span><b>%s</b><small>%.1f%%</small></div>',
       item.class:gsub("%-line$", ""), esc(item.label), esc(compactNumber(total)), share(total, periodTotal))
@@ -1419,6 +1413,38 @@ local function tokenSourceLineHTML(points, days, label)
       <div class="source-legends">%s</div>
     </div>
   ]], esc(label), esc(label), lines, legends)
+end
+
+local function todaySourceBarHTML(window)
+  window = window or {}
+  local items = window.sources or {}
+  local maxTokens = 0
+  for index, item in ipairs(items) do
+    if index > 6 then break end
+    maxTokens = math.max(maxTokens, tonumber(item.tokens) or 0)
+  end
+  local bars = ""
+  for index, item in ipairs(items) do
+    if index > 6 then break end
+    local tokens = tonumber(item.tokens) or 0
+    local height = maxTokens > 0 and math.max(5, math.floor(tokens * 100 / maxTokens + .5)) or 5
+    local id = tostring(item.id or "unknown")
+    bars = bars .. string.format([[
+      <div class="today-bar-item" title="%s · %s Token · %.1f%%">
+        <div class="today-bar-value">%s</div>
+        <div class="today-bar-track"><span style="height:%d%%"></span></div>
+        <div class="today-bar-label">%s</div><small>%.1f%%</small>
+      </div>
+    ]], esc(TOKEN_SOURCE_LABELS[id] or id), esc(compactNumber(tokens)), share(tokens, window.tokens),
+      esc(compactNumber(tokens)), height, esc(TOKEN_SOURCE_LABELS[id] or id), share(tokens, window.tokens))
+  end
+  if bars == "" then bars = '<div class="detail-empty">今日尚無 Token 事件</div>' end
+  return string.format([[
+    <div class="today-bar-chart" role="img" aria-label="今日各平台 Token 長條圖">
+      <div class="trend-head"><span>今日各平台 Token</span><small>數量與占比</small></div>
+      <div class="today-bars">%s</div>
+    </div>
+  ]], bars)
 end
 
 local function tokenLedgerOverviewHTML(s)
@@ -1562,8 +1588,8 @@ local function tokenWindowPanel(name, window, active, trend)
     </div>
   ]], active and " is-active" or "", esc(name), esc(compactNumber(window.tokens)),
     esc(tostring(window.events or 0)), tonumber(window.local_share_pct) or 0,
-    tokenSourceLineHTML(trend, name == "today" and 1 or (name == "7d" and 7 or (name == "3d" and 3 or 30)),
-      name == "today" and "今日 Token 來源趨勢" or ("近 " .. name .. " Token 來源趨勢")),
+    name == "today" and todaySourceBarHTML(window)
+      or tokenSourceLineHTML(trend, name == "7d" and 7 or (name == "3d" and 3 or 30), "近 " .. name .. " Token 來源趨勢"),
     tokenRows(window.sources, window.tokens, TOKEN_SOURCE_LABELS, 12),
     tokenRows(localItems, window.local_tokens, TOKEN_SOURCE_LABELS, 8),
     tokenRows(window.projects, window.tokens, nil, 12))
@@ -2862,6 +2888,14 @@ local function buildHTML(s)
   .top-one-legend span::before { background:#FF9F0A; }
   .top-two-legend span::before { background:#FF375F; }
   .source-legend:last-child { grid-column:1 / -1; }
+  .today-bar-chart { margin:10px 0 12px; padding:11px; border-radius:17px; background:rgba(120,120,128,.11); }
+  .today-bars { display:flex; align-items:flex-end; gap:7px; min-height:176px; margin-top:8px; overflow-x:auto; }
+  .today-bar-item { flex:1 0 64px; min-width:0; text-align:center; }
+  .today-bar-value { height:18px; color:var(--text); font-size:9px; font-weight:750; font-variant-numeric:tabular-nums; }
+  .today-bar-track { position:relative; height:112px; border-radius:9px; background:rgba(120,120,128,.13); overflow:hidden; }
+  .today-bar-track span { position:absolute; left:0; right:0; bottom:0; border-radius:9px 9px 5px 5px; background:linear-gradient(180deg,var(--chart-primary),var(--chart-secondary)); }
+  .today-bar-label { margin-top:6px; overflow:hidden; color:var(--text); font-size:9px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
+  .today-bar-item small { color:var(--sub); font-size:8px; }
   .window-tabs { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: var(--fill); }
   .window-tabs button { appearance: none; border: 0; border-radius: 10px; height: 32px; color: var(--sub); background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
   .window-tabs button.is-active { color: var(--text); background: var(--card); box-shadow: 0 1px 4px var(--drop), 0 1px 0 var(--inset) inset; }
