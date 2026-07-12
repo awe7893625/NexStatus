@@ -1,1 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+*.app/
+*.dSYM/
+
+# Local / secrets (never commit)
+.env
+.env.*
+*.pem
+auth.json
+**/auth.json
+
+# Build / logs
+*.log
+.cache/
+dist/
+build/
 .build/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+# Internal orchestration / private work packets (never publish)
+.workflow/
+.worktrees/
+# Runtime cache / snapshots (owner machine only)
+**/status.json
+**/panel-debug.html
+nexstatus/**/__pycache__/
+hammerspoon/**/*.bak*
