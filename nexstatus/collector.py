@@ -40,6 +40,11 @@ COST_DB = Path(os.environ.get("NEXSTATUS_COST_DB", os.path.expanduser("~/.claude
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 GROK_TTL = 5 * 60  # seconds — billing is monthly, no need to hammer API
+# x.ai's /v1/billing endpoint returns credits only, never a USD figure — the
+# subscription price has to be hand-maintained here (Rain-confirmed 2026-07-12).
+# Bump this when the plan tier or price changes; nothing else will catch it.
+GROK_PLAN_NAME = "SuperGrok"
+GROK_PLAN_PRICE_USD_MO = 30.0
 GO_TTL_OK = 5 * 60
 GO_TTL_CAPPED = 15 * 60  # when already at limit, probe less often
 CLAUDE_FRESH_TTL = 90  # recent sanitized status/cache freshness window
@@ -427,6 +432,8 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
     result = {
         "ok": True,
         "source": GROK_BILLING_URL,
+        "plan": GROK_PLAN_NAME,
+        "price": f"${GROK_PLAN_PRICE_USD_MO:g}/mo",
         "used": used,
         "monthly_limit": limit,
         "used_pct": pct,

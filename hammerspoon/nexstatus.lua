@@ -1910,7 +1910,7 @@ local function buildHTML(s)
     grok = rowHTML({
       id = "grok",
       name = "Grok",
-      badge = "credits",
+      badge = gk.price or "SuperGrok $30/mo",
       accent = "#BF5AF2",
       main = gkMain,
       sub = gkSub,
