@@ -16,6 +16,7 @@ end
 
 local item = nil
 local timer = nil
+local menuCycleTimer = nil
 local panel = nil
 local redrawPanel = nil
 local collectorTask = nil
@@ -3785,12 +3786,12 @@ function M.refreshTitleOnly()
   end
   hostLoad = math.max(0, math.min(100, math.floor(hostLoad + 0.5)))
   local hostLabel = (hostLoad >= 80 and "H!" or "H") .. tostring(hostLoad) .. "%"
-  local title = string.format(
-    "C%sG%s%s",
-    menuPct(cl.ok, cl.five_hour_pct),
-    menuPct(cx.ok, cx.five_hour_pct),
-    hostLabel
-  )
+  local menuMetrics = {
+    "C" .. menuPct(cl.ok, cl.five_hour_pct),
+    "G" .. menuPct(cx.ok, cx.five_hour_pct),
+    hostLabel,
+  }
+  local title = menuMetrics[(math.floor(os.time() / 3) % #menuMetrics) + 1]
   local tip = string.format(
     "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %.0f MB\nAI 額度雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nA = Antigravity %s (%s)\nOpenCode Go %s\n點一下開啟儀表板",
     hostLoad,
@@ -3867,6 +3868,9 @@ function M.start()
   timer = hs.timer.doEvery(15, function()
     M.refresh()
   end)
+  menuCycleTimer = hs.timer.doEvery(3, function()
+    M.refreshTitleOnly()
+  end)
 
   -- Watchdog: if MenuBar item disappears, recreate (every 30s)
   M._watch = hs.timer.doEvery(30, function()
@@ -3913,6 +3917,7 @@ end
 
 function M.stop()
   if timer then pcall(function() timer:stop() end); timer = nil end
+  if menuCycleTimer then pcall(function() menuCycleTimer:stop() end); menuCycleTimer = nil end
   refreshQueued = false
   if panelFadeTimer then pcall(function() panelFadeTimer:stop() end); panelFadeTimer = nil end
   if collectorWatchdog then pcall(function() collectorWatchdog:stop() end); collectorWatchdog = nil end
