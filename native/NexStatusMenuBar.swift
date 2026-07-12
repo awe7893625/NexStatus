@@ -122,7 +122,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPanel() {
         guard let url = URL(string: "hammerspoon://nexstatus") else { return }
-        NSWorkspace.shared.open(url)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+            if let error {
+                NSLog("NexStatus URL callback failed: %@", error.localizedDescription)
+            }
+        }
     }
 }
 
