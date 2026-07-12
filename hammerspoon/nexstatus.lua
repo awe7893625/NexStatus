@@ -3696,7 +3696,9 @@ local function ensureMenubarItem()
     pcall(function() item:delete() end)
     item = nil
   end
-  item = hs.menubar.new(true)
+  -- Stable autosave identity prevents Tahoe from restoring a recreated item
+  -- beyond the right screen edge after reload/remove-return cycles.
+  item = hs.menubar.new(true, "NexStatusUsage")
   if not item then
     hs.printf("[nexstatus] failed to create menubar item")
     return false
