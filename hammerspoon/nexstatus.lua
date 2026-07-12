@@ -3698,7 +3698,7 @@ local function ensureMenubarItem()
   end
   -- Stable autosave identity prevents Tahoe from restoring a recreated item
   -- beyond the right screen edge after reload/remove-return cycles.
-  item = hs.menubar.new(true, "NexStatusUsage")
+  item = hs.menubar.new(true, "NexStatusUsageV2")
   if not item then
     hs.printf("[nexstatus] failed to create menubar item")
     return false
