@@ -26,6 +26,7 @@ local refreshQueued = false
 local HOME = os.getenv("HOME") or ""
 local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Developer/NexStatus")
 local SNAP = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. "/status.json"
+local NATIVE_MENUBAR_MARKER = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. "/native-menubar.enabled"
 local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatus")) .. "/prefs.json"
 local PY = ROOT .. "/nexstatus/collector.py"
 local PYTHON = "/usr/bin/python3"
@@ -51,7 +52,7 @@ local ACCENTS = {
 local SECTION_ORDER = { "compute", "radar", "loaders", "providers" }
 -- Per-grid tile orders (each card cell can be reordered independently).
 local TILE_ORDER_DEFAULTS = {
-  token_kpis = { "3d", "7d", "30d" },
+  token_kpis = { "today", "3d", "7d", "30d" },
   token_sources = { "claude", "codex", "free", "local", "other" },
   providers = { "claude", "codex", "go", "grok", "antigravity", "mac" },
 }
@@ -266,7 +267,7 @@ local prefs = {
   density = "comfortable",
   edit_layout = false,
   section_order = { "compute", "radar", "loaders", "providers" },
-  token_kpi_order = { "3d", "7d", "30d" },
+  token_kpi_order = { "today", "3d", "7d", "30d" },
   token_source_order = { "claude", "codex", "free", "local", "other" },
   provider_order = { "claude", "codex", "go", "grok", "antigravity", "mac" },
 }
@@ -682,6 +683,8 @@ local function fmtIsoReset(value)
   return value:gsub("T", " "):gsub("Z$", " UTC")
 end
 
+local esc
+
 local function providerUsageSheetHTML(id, title, subtitle, rows, source)
   local body = ""
   for _, row in ipairs(rows or {}) do
@@ -729,7 +732,7 @@ local function applyThemeMaterial(tid)
   prefs.glass_preset = "custom"
 end
 
-local function esc(s)
+esc = function(s)
   if s == nil then return "" end
   return tostring(s)
     :gsub("&", "&amp;")
@@ -788,6 +791,7 @@ local TOKEN_SOURCE_META = {
   other = { label = "其他", accent = "#8E8E93" },
 }
 local TOKEN_KPI_META = {
+  today = { label = "今日", accent = "#30D158" },
   ["3d"] = { label = "近 3 日", accent = "#0A84FF" },
   ["7d"] = { label = "近 7 日", accent = "#0A84FF" },
   ["30d"] = { label = "近 30 日", accent = "#0A84FF" },
@@ -799,6 +803,7 @@ local function themedSourceAccent(id, fallback)
   if id == "local" then return th.chart_local or fallback end
   if id == "claude" then return th.chart_primary or th.blue or fallback end
   if id == "codex" then return th.chart_secondary or th.blue or fallback end
+  if id == "today" then return th.chart_ok or th.green or fallback end
   if id == "3d" or id == "7d" or id == "30d" then return th.chart_primary or th.blue or fallback end
   return fallback
 end
@@ -1345,22 +1350,51 @@ local function tokenSourceLineHTML(points, days, label)
   local series = {
     { id="claude", label="Claude", class="claude-line" },
     { id="codex", label="Codex", class="codex-line" },
+    { id="grok", label="Grok", class="grok-line" },
     { id="free_cloud", label="免費雲", class="free-line" },
     { id="local_compute", label="本地", class="local-line" },
     { id="other", label="其他", class="other-line" },
   }
+  local exactTotals = {}
+  for index = startIndex, #list do
+    for id, value in pairs((list[index] or {}).source_tokens or {}) do
+      exactTotals[id] = (exactTotals[id] or 0) + (tonumber(value) or 0)
+    end
+  end
+  local ranked = {}
+  for id, total in pairs(exactTotals) do
+    local lower = id:lower()
+    local core = id == "claude-code-oauth-quota" or id == "codex-plus-subscription"
+      or lower:find("grok", 1, true) or lower:find("xai", 1, true)
+      or lower:find("local-", 1, true) == 1 or lower:find("free", 1, true)
+    if not core then table.insert(ranked, { id=id, total=total }) end
+  end
+  table.sort(ranked, function(a, b) return a.total > b.total end)
+  local topClasses = { "top-one-line", "top-two-line" }
+  for index = 1, math.min(2, #ranked) do
+    table.insert(series, {
+      id = "source:" .. ranked[index].id,
+      source_id = ranked[index].id,
+      label = TOKEN_SOURCE_LABELS[ranked[index].id] or ranked[index].id,
+      class = topClasses[index],
+    })
+  end
+  local function pointValue(point, item)
+    if item.source_id then return tonumber((point.source_tokens or {})[item.source_id]) or 0 end
+    return tonumber(point[item.id]) or 0
+  end
   local maxTokens, periodTotal = 0, 0
   for index = startIndex, #list do
     local point = list[index] or {}
     periodTotal = periodTotal + (tonumber(point.tokens) or 0)
-    for _, item in ipairs(series) do maxTokens = math.max(maxTokens, tonumber(point[item.id]) or 0) end
+    for _, item in ipairs(series) do maxTokens = math.max(maxTokens, pointValue(point, item)) end
   end
   local count = math.max(1, #list - startIndex + 1)
   local lines, legends = "", ""
   for _, item in ipairs(series) do
     local coords, total = {}, 0
     for index = startIndex, #list do
-      local value = tonumber((list[index] or {})[item.id]) or 0
+      local value = pointValue(list[index] or {}, item)
       total = total + value
       local x = count > 1 and ((index - startIndex) * 300 / (count - 1)) or 0
       local y = maxTokens > 0 and (82 - value * 70 / maxTokens) or 82
@@ -1368,10 +1402,10 @@ local function tokenSourceLineHTML(points, days, label)
     end
     lines = lines .. string.format('<polyline class="source-line %s" points="%s" />', item.class, table.concat(coords, " "))
     legends = legends .. string.format('<div class="source-legend %s-legend"><span>%s</span><b>%s</b><small>%.1f%%</small></div>',
-      item.id:gsub("_", "-"), esc(item.label), esc(compactNumber(total)), share(total, periodTotal))
+      item.class:gsub("%-line$", ""), esc(item.label), esc(compactNumber(total)), share(total, periodTotal))
   end
   return string.format([[
-    <div class="source-line-chart" role="img" aria-label="%s五類 Token 來源線圖">
+    <div class="source-line-chart" role="img" aria-label="%s主要 Token 來源線圖">
       <div class="trend-head"><span>%s</span><small>同尺度 · 每日 Token</small></div>
       <svg viewBox="0 0 300 90" preserveAspectRatio="none" aria-hidden="true">
         <path class="chart-grid" d="M0 12H300 M0 47H300 M0 82H300" />%s
@@ -1386,7 +1420,7 @@ local function tokenLedgerOverviewHTML(s)
   if ledger.ok ~= true then return ledgerOverviewHTML(s) end
   local windows = ledger.windows or {}
   local trend = ledger.trend_30d or {}
-  local recent, week, month = windows["3d"] or {}, windows["7d"] or {}, windows["30d"] or {}
+  local today, recent, week, month = windows["today"] or {}, windows["3d"] or {}, windows["7d"] or {}, windows["30d"] or {}
   local compute = ledger.compute_capacity or {}
   local free = compute.free_cloud or {}
   local localCompute = compute.local_compute or {}
@@ -1434,6 +1468,10 @@ local function tokenLedgerOverviewHTML(s)
       and '<div class="quality-banner" role="status">' .. esc(table.concat(warnings, " · ")) .. '</div>' or ""
 
   local kpiTiles = {
+    today = string.format(
+      [[<button type="button" class="kpi window-kpi" data-sheet-open="ledger" data-window-target="today"><span>今日</span><strong>%s</strong><small>%s events · 台北 00:00 起</small></button>]],
+      esc(compactNumber(today.tokens)), esc(tostring(today.events or 0))
+    ),
     ["3d"] = string.format(
       [[<button type="button" class="kpi window-kpi" data-sheet-open="ledger" data-window-target="3d"><span>近 3 日</span><strong>%s</strong><small>%.1f%%／近 30 日</small></button>]],
       esc(compactNumber(recent.tokens)), share(recent.tokens, month.tokens)
@@ -1517,7 +1555,8 @@ local function tokenWindowPanel(name, window, active, trend)
     </div>
   ]], active and " is-active" or "", esc(name), esc(compactNumber(window.tokens)),
     esc(tostring(window.events or 0)), tonumber(window.local_share_pct) or 0,
-    tokenSourceLineHTML(trend, name == "7d" and 7 or (name == "3d" and 3 or 30), "近 " .. name .. " Token 來源趨勢"),
+    tokenSourceLineHTML(trend, name == "today" and 1 or (name == "7d" and 7 or (name == "3d" and 3 or 30)),
+      name == "today" and "今日 Token 來源趨勢" or ("近 " .. name .. " Token 來源趨勢")),
     tokenRows(window.sources, window.tokens, TOKEN_SOURCE_LABELS, 12),
     tokenRows(localItems, window.local_tokens, TOKEN_SOURCE_LABELS, 8),
     tokenRows(window.projects, window.tokens, nil, 12))
@@ -1536,16 +1575,18 @@ local function tokenLedgerDetailHTML(s)
         <button class="sheet-close" type="button" data-sheet-close="ledger" aria-label="關閉 Token 分析">×</button>
       </header>
       <div class="window-tabs" role="tablist" aria-label="Token 時間範圍">
-        <button class="is-active" type="button" data-window="7d">近 7 日</button>
+        <button class="is-active" type="button" data-window="today">今日</button>
+        <button type="button" data-window="7d">近 7 日</button>
         <button type="button" data-window="3d">近 3 日</button>
         <button type="button" data-window="30d">近 30 日</button>
       </div>
       <div class="sheet-scroll">
-        %s%s%s
+        %s%s%s%s
         <div class="meaning-note">平台與專案比例以所選時間窗 Token 總量計算；本地算力包含 local-ollama 與 local-mlx 等明確本地來源。</div>
       </div>
     </section>
-  ]], tokenWindowPanel("7d", windows["7d"], true, ledger.trend_30d), tokenWindowPanel("3d", windows["3d"], false, ledger.trend_30d),
+  ]], tokenWindowPanel("today", windows["today"], true, ledger.trend_30d),
+    tokenWindowPanel("7d", windows["7d"], false, ledger.trend_30d), tokenWindowPanel("3d", windows["3d"], false, ledger.trend_30d),
     tokenWindowPanel("30d", windows["30d"], false, ledger.trend_30d))
 end
 
@@ -1729,14 +1770,19 @@ local function buildHTML(s)
     goBars = {}
   end
 
-  local gkMain = gk.ok and (pctText(gk.used_pct) .. " · 月額度") or "離線"
+  local gkMain = gk.ok and (
+      gk.weekly_available and (pctText(gk.weekly_used_pct) .. " · 週額度")
+      or (pctText(gk.used_pct) .. " · 月 credits")
+    ) or "離線"
   local gkUsed = gk.used and string.format("%.0f", gk.used) or "—"
   local gkLim = gk.monthly_limit and string.format("%.0f", gk.monthly_limit) or "—"
-  local gkSub = gk.ok
-      and string.format("%s / %s credits · %s → %s",
+  local gkSub = gk.ok and (gk.weekly_available
+      and string.format("本週重置 %s · 月 credits %s / %s",
+        fmtIsoReset(gk.weekly_reset_at), gkUsed, gkLim)
+      or string.format("尚未取得週額度欄位 · 月 credits %s / %s · %s → %s",
         gkUsed, gkLim,
         tostring(gk.period_start or ""):sub(1, 10),
-        tostring(gk.period_end or ""):sub(1, 10))
+        tostring(gk.period_end or ""):sub(1, 10)))
     or (gk.error or "請先 grok login")
 
   local memMain = string.format("MEM %s", pctText(host.mem_pct))
@@ -1829,7 +1875,8 @@ local function buildHTML(s)
       main = gkMain,
       sub = gkSub,
       bars = gk.ok and {
-        { label = "本月額度", pct = gk.used_pct },
+        { label = "SuperGrok 本週", pct = gk.weekly_used_pct },
+        { label = "月 credits", pct = gk.used_pct },
       } or {},
     }),
     antigravity = rowHTML({
@@ -1918,7 +1965,8 @@ local function buildHTML(s)
     .. providerUsageSheetHTML("go", "OpenCode Go Usage", tostring(go.limit_name or "官方額度"), {
       { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
     }, go.live_status == "capped" and "OpenCode 官方 429" or "本機成本帳估算")
-    .. providerUsageSheetHTML("grok", "Grok Usage", "月額度與 credits", {
+    .. providerUsageSheetHTML("grok", "Grok Usage", "SuperGrok 共用週額度與月 credits", {
+      { label = "SuperGrok 共用週額度", usage = pctText(gk.weekly_used_pct), reset = fmtIsoReset(gk.weekly_reset_at) },
       { label = "月額度", usage = pctText(gk.used_pct), reset = fmtIsoReset(gk.period_end) },
     }, gk.source)
     .. providerUsageSheetHTML("antigravity", "Antigravity Usage", "各模型視窗", agRows, ag.source)
@@ -2789,7 +2837,10 @@ local function buildHTML(s)
   .source-line { fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
   .claude-line { stroke:#D97757; }
   .codex-line { stroke:#10A37F; }
+  .grok-line { stroke:#F5F5F7; }
   .other-line { stroke:#BF5AF2; }
+  .top-one-line { stroke:#FF9F0A; stroke-dasharray:5 3; }
+  .top-two-line { stroke:#FF375F; stroke-dasharray:3 3; }
   .source-legends { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-top:7px; }
   .source-legend { display:grid; grid-template-columns:auto 1fr auto; align-items:baseline; gap:5px; padding:7px 8px; border-radius:11px; background:rgba(120,120,128,.13); font-size:9px; }
   .source-legend span::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%%; }
@@ -2797,11 +2848,14 @@ local function buildHTML(s)
   .source-legend small { color:var(--sub); }
   .claude-legend span::before { background:#D97757; }
   .codex-legend span::before { background:#10A37F; }
+  .grok-legend span::before { background:#F5F5F7; }
   .free-cloud-legend span::before { background:var(--chart-free); }
   .local-compute-legend span::before { background:var(--chart-local); }
   .other-legend span::before { background:#BF5AF2; }
+  .top-one-legend span::before { background:#FF9F0A; }
+  .top-two-legend span::before { background:#FF375F; }
   .source-legend:last-child { grid-column:1 / -1; }
-  .window-tabs { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: var(--fill); }
+  .window-tabs { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin: 13px 0 7px; padding: 4px; border-radius: 14px; background: var(--fill); }
   .window-tabs button { appearance: none; border: 0; border-radius: 10px; height: 32px; color: var(--sub); background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
   .window-tabs button.is-active { color: var(--text); background: var(--card); box-shadow: 0 1px 4px var(--drop), 0 1px 0 var(--inset) inset; }
   .window-panel { display: none; }
@@ -2838,7 +2892,7 @@ local function buildHTML(s)
   .window-kpi { appearance:none; border:0; color:inherit; text-align:left; font:inherit; cursor:pointer; }
   .window-kpi:hover { background:rgba(120,120,128,.24); }
   .window-kpi:focus-visible { box-shadow:0 0 0 3px rgba(10,132,255,.42); outline:0; }
-  .compute-lens .token-kpis { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .compute-lens .token-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .compute-lens .source-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .compute-lens .source-chip { min-height:70px; }
   .other-metric { grid-column:1 / -1; min-height:58px !important; }
@@ -3332,7 +3386,10 @@ end
 
 local function positionPanel()
   if not panel then return end
-  local screen = hs.screen.mainScreen()
+  -- The native status item always lives on the primary display's Menu Bar.
+  -- Mouse coordinates can be flipped by AX in vertically stacked displays, so
+  -- primaryScreen() is the stable anchor for this panel.
+  local screen = hs.screen.primaryScreen() or hs.screen.mainScreen()
   local sf = screen:fullFrame()
   -- Top-right under menu bar, clamp height to visible frame
   local maxH = math.min(PANEL_H, math.floor(sf.h * 0.88))
@@ -3622,6 +3679,9 @@ local function showPanel()
   -- Soft open: avoid hard pop-in under the MenuBar.
   pcall(function() panel:alpha(0) end)
   panel:show()
+  -- hs.webview may ignore a frame change while hidden after display topology
+  -- changes. Reapply once its NSWindow exists and is visible.
+  positionPanel()
   panel:bringToFront(true)
   if panel.alpha then
     local steps, i = 7, 0
@@ -3683,6 +3743,10 @@ local function applyMenubarIcon()
   pcall(function() item:setIcon(nil) end)
 end
 
+local function nativeMenuBarEnabled()
+  return hs.fs.attributes(NATIVE_MENUBAR_MARKER) ~= nil
+end
+
 local function ensureMenubarItem()
   -- Tahoe / crowded MenuBar: dead hs.menubar refs leave no visible item while
   -- the module still thinks it is running. Always recreate when missing.
@@ -3718,6 +3782,7 @@ local function ensureMenubarItem()
 end
 
 function M.refreshTitleOnly()
+  if nativeMenuBarEnabled() then return end
   if not ensureMenubarItem() then return end
   local s = readSnapshot() or {}
   local host = s.host or {}
@@ -3820,7 +3885,7 @@ function M.refreshTitleOnly()
 end
 
 function M.refresh()
-  if not ensureMenubarItem() then return end
+  if not nativeMenuBarEnabled() and not ensureMenubarItem() then return end
   refreshSnapshot(false)
   -- Paint the current snapshot immediately; the async collector repaints only
   -- after a successful atomic refresh.
@@ -3845,6 +3910,11 @@ function M.start()
   end
   refreshQueued = false
 
+  -- Native Menu Bar app uses this permission-free callback to open the panel.
+  hs.urlevent.bind("nexstatus", function()
+    M.openPanel()
+  end)
+
   if item then
     pcall(function() item:delete() end)
     item = nil
@@ -3858,30 +3928,30 @@ function M.start()
     panel = nil
   end
 
-  if not ensureMenubarItem() then
-    return
-  end
+  local useNativeMenuBar = nativeMenuBarEnabled()
+  if not useNativeMenuBar and not ensureMenubarItem() then return end
 
   -- Warm snapshot so first open is instant
   pcall(function() refreshSnapshot(false) end)
-  M.refreshTitleOnly()
+  if not useNativeMenuBar then M.refreshTitleOnly() end
   timer = hs.timer.doEvery(15, function()
     M.refresh()
   end)
-  menuCycleTimer = hs.timer.doEvery(3, function()
-    M.refreshTitleOnly()
-  end)
+  if not useNativeMenuBar then
+    menuCycleTimer = hs.timer.doEvery(3, function()
+      M.refreshTitleOnly()
+    end)
+  end
 
   -- Watchdog: if MenuBar item disappears, recreate (every 30s)
-  M._watch = hs.timer.doEvery(30, function()
-    if not ensureMenubarItem() then return end
-    -- Title is "C..% G..% H..%" — empty/whitespace only means paint failed.
-    local t = nil
-    pcall(function() t = item:title() end)
-    if type(t) ~= "string" or t:match("%S") == nil then
-      M.refreshTitleOnly()
-    end
-  end)
+  if not useNativeMenuBar then
+    M._watch = hs.timer.doEvery(30, function()
+      if not ensureMenubarItem() then return end
+      local t = nil
+      pcall(function() t = item:title() end)
+      if type(t) ~= "string" or t:match("%S") == nil then M.refreshTitleOnly() end
+    end)
+  end
 
   -- Click outside panel to dismiss — but never on the open-click itself
   M._tap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(_e)

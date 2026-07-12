@@ -245,7 +245,8 @@ def collect_ledger_summary(
         daily_tokens = {
             (trend_start + timedelta(days=offset)).isoformat(): {
                 "tokens": 0, "claude": 0, "codex": 0,
-                "free_cloud": 0, "local_compute": 0, "other": 0,
+                "grok": 0, "free_cloud": 0, "local_compute": 0, "other": 0,
+                "source_tokens": {},
             }
             for offset in range(30)
         }
@@ -296,11 +297,15 @@ def collect_ledger_summary(
                     trend_class = "claude"
                 elif quota_source == "codex-plus-subscription":
                     trend_class = "codex"
+                elif "grok" in quota_source.lower() or "xai" in quota_source.lower():
+                    trend_class = "grok"
                 elif cost_class in {"free_cloud", "local_compute"}:
                     trend_class = cost_class
                 else:
                     trend_class = "other"
                 daily_tokens[event_day][trend_class] += event_tokens
+                source_tokens = daily_tokens[event_day]["source_tokens"]
+                source_tokens[quota_source] = source_tokens.get(quota_source, 0) + event_tokens
 
             if window_cutoffs["30d"] <= event_time <= current and cost_class == "free_cloud":
                 raw_key_id = str(row["api_key_id"] or "").strip()

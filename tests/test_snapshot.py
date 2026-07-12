@@ -18,6 +18,19 @@ def provider(ok: bool = True, **values: object) -> dict[str, object]:
 
 
 class SnapshotContractTests(unittest.TestCase):
+    def test_grok_weekly_usage_extracts_pool_reset_and_product_breakdown(self) -> None:
+        result = collector._grok_weekly_usage({
+            "weeklyUsage": {
+                "usedPercent": 42,
+                "resetsAt": "2026-07-18T04:00:00Z",
+                "breakdown": {"chat": 20, "build": {"usedPercent": 22}, "private": 99},
+            }
+        })
+        self.assertTrue(result["weekly_available"])
+        self.assertEqual(result["weekly_used_pct"], 42)
+        self.assertEqual(result["weekly_reset_at"], "2026-07-18T04:00:00Z")
+        self.assertEqual(result["weekly_breakdown"], {"chat": 20, "build": 22})
+
     def base_patches(self) -> list[mock._patch]:
         return [
             mock.patch.object(collector, "host_metrics", return_value=provider(mem_pct=10, swap_mb=0)),

@@ -29,6 +29,7 @@ echo "Linked ${LINK} → hammerspoon/nexstatus.lua"
 
 # Ensure collector is executable
 chmod +x "${ROOT}/nexstatus/collector.py"
+chmod +x "${ROOT}/scripts/build-native-menubar.sh"
 
 # Inject load block into init.lua (idempotent)
 BLOCK=$(cat <<'EOF'
@@ -69,6 +70,10 @@ fi
 # First snapshot
 /usr/bin/python3 "${ROOT}/nexstatus/collector.py" --print || true
 
+# Build and install the native status item. The Hammerspoon module remains the
+# detailed glass panel, while Swift owns the notch-safe Menu Bar presentation.
+"${ROOT}/scripts/build-native-menubar.sh"
+
 # Reload Hammerspoon if CLI available
 if command -v hs >/dev/null 2>&1; then
   hs -c 'hs.reload()' 2>/dev/null || true
@@ -78,5 +83,5 @@ else
 fi
 
 echo ""
-echo "Done. Look for MenuBar title like: Cl12 · Cx5 · Go40 · G8 · M30"
+echo "Done. Look for the rotating native MenuBar title: C… / G… / H…"
 echo "Click it to open the glass panel."

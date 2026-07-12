@@ -329,6 +329,56 @@ def _find_rate_limits(obj: Any, depth: int = 0) -> dict[str, Any] | None:
     return None
 
 
+def _grok_weekly_usage(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Extract consumer weekly-pool fields without persisting account details."""
+    weekly = next(
+        (
+            cfg.get(key)
+            for key in ("weeklyUsage", "weekly_usage", "weeklyLimit", "weekly_limit")
+            if isinstance(cfg.get(key), dict)
+        ),
+        {},
+    )
+    used_pct = None
+    for value in (
+        weekly.get("usedPercent"), weekly.get("used_pct"), weekly.get("percentageUsed"),
+        cfg.get("weeklyUsagePercent"), cfg.get("weekly_used_pct"),
+    ):
+        used_pct = _pct(value)
+        if used_pct is not None:
+            break
+    used = _money_val(weekly.get("used"))
+    limit = _money_val(weekly.get("limit") or weekly.get("allowance"))
+    if used_pct is None and used is not None and limit and limit > 0:
+        used_pct = _pct(100 * used / limit)
+
+    breakdown_raw = weekly.get("breakdown") or weekly.get("products") or cfg.get("weeklyUsageBreakdown")
+    breakdown: dict[str, int] = {}
+    if isinstance(breakdown_raw, dict):
+        for product, value in breakdown_raw.items():
+            pct_value = _pct(value.get("usedPercent") if isinstance(value, dict) else value)
+            if pct_value is not None and str(product).lower() in {"api", "build", "chat", "imagine", "voice"}:
+                breakdown[str(product).lower()] = pct_value
+
+    reset_at = next(
+        (
+            value for value in (
+                weekly.get("resetsAt"), weekly.get("resetAt"), weekly.get("reset_at"),
+                cfg.get("weeklyResetAt"), cfg.get("weekly_reset_at"),
+            ) if isinstance(value, str) and value
+        ),
+        None,
+    )
+    return {
+        "weekly_used_pct": used_pct,
+        "weekly_used": used,
+        "weekly_limit": limit,
+        "weekly_reset_at": reset_at,
+        "weekly_breakdown": breakdown,
+        "weekly_available": used_pct is not None or reset_at is not None or bool(breakdown),
+    }
+
+
 def grok_usage(force: bool = False) -> dict[str, Any]:
     # Prefer short-lived cache so MenuBar refresh doesn't hit network every 2s
     if not force and GROK_CACHE.exists():
@@ -386,6 +436,7 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         "unit": "credits",
         "_fetched_at": datetime.now(timezone.utc).isoformat(),
         "_fetched_at_ts": _now(),
+        **_grok_weekly_usage(cfg),
     }
     try:
         _write_cache_json(GROK_CACHE, result)
