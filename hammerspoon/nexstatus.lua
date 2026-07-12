@@ -1535,7 +1535,8 @@ local function tokenLedgerOverviewHTML(s)
   ]], esc(shadow), esc(cash), esc(events))
 
   return string.format([[
-    <section class="ledger-overview token-overview" aria-label="Token 使用研究總覽">
+    <section class="ledger-overview token-overview" data-sheet-open="ledger" tabindex="0" role="button"
+      aria-label="開啟完整 Token 使用分析">
       <div class="ledger-head">
         <div><div class="section-kicker">TOKEN LEDGER · %s</div><div class="ledger-title">Token 使用研究</div></div>
         <div class="ledger-actions">
@@ -1543,6 +1544,7 @@ local function tokenLedgerOverviewHTML(s)
           <button type="button" data-sheet-open="ledger">Token</button>
         </div>
       </div>
+      <div class="overview-open-hint" aria-hidden="true">點擊任意空白處查看完整明細 <b>›</b></div>
       %s
       <div class="kpi-grid token-kpis">%s</div>
       %s
@@ -1812,11 +1814,16 @@ local function buildHTML(s)
   local gkSub = gk.ok and (gk.weekly_available
       and string.format("本週重置 %s · 月 credits %s / %s",
         fmtIsoReset(gk.weekly_reset_at), gkUsed, gkLim)
-      or string.format("尚未取得週額度欄位 · 月 credits %s / %s · %s → %s",
+      or string.format("週額度僅見於 Grok Settings → Usage；CLI API 未提供 · 月 credits %s / %s · %s → %s",
         gkUsed, gkLim,
         tostring(gk.period_start or ""):sub(1, 10),
         tostring(gk.period_end or ""):sub(1, 10)))
     or (gk.error or "請先 grok login")
+  local gkBars = {}
+  if gk.ok and gk.weekly_available then
+    table.insert(gkBars, { label = "SuperGrok 本週", pct = gk.weekly_used_pct })
+  end
+  if gk.ok then table.insert(gkBars, { label = "月 credits", pct = gk.used_pct }) end
 
   local memMain = string.format("MEM %s", pctText(host.mem_pct))
   local memSub = string.format("%.1f / %.0f GB · Swap %.0f MB · %s · CPU %s",
@@ -1907,10 +1914,7 @@ local function buildHTML(s)
       accent = "#BF5AF2",
       main = gkMain,
       sub = gkSub,
-      bars = gk.ok and {
-        { label = "SuperGrok 本週", pct = gk.weekly_used_pct },
-        { label = "月 credits", pct = gk.used_pct },
-      } or {},
+      bars = gkBars,
     }),
     antigravity = rowHTML({
       id = "antigravity",
@@ -2427,6 +2431,12 @@ local function buildHTML(s)
       0 1px 0 var(--inset) inset,
       0 14px 32px var(--drop);
   }
+  .token-overview[data-sheet-open] { cursor:pointer; transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease; }
+  .token-overview[data-sheet-open]:hover { border-color:color-mix(in srgb,var(--accent) 42%%,var(--card-border)); box-shadow:0 1px 0 var(--inset) inset,0 17px 38px var(--drop); }
+  .token-overview[data-sheet-open]:active { transform:scale(.995); }
+  .token-overview[data-sheet-open]:focus-visible { outline:0; box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 48%%,transparent),0 14px 32px var(--drop); }
+  .overview-open-hint { display:flex; justify-content:flex-end; align-items:center; gap:5px; margin:-5px 1px 9px; color:var(--sub); font-size:9px; }
+  .overview-open-hint b { color:var(--accent); font-size:16px; line-height:1; }
   .ledger-head {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
     margin-bottom: 12px;
@@ -3931,10 +3941,9 @@ function M.refresh()
   -- Paint the current snapshot immediately; the async collector repaints only
   -- after a successful atomic refresh.
   M.refreshTitleOnly()
-  -- Live-update open panel
-  if panel and panel:hswindow() and panel:hswindow():isVisible() then
-    panel:html(buildHTML(readSnapshot()))
-  end
+  -- Do not replace the entire WebView DOM on every background poll. Replacing
+  -- it while the user is scrolling or opening a sheet causes dropped clicks,
+  -- scroll jumps, and apparent freezes. Reopen or use 重新整理 for fresh data.
 end
 
 function M.start()

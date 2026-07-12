@@ -46,11 +46,17 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn('id="ledger-sheet"', self.source)
         self.assertIn('role="dialog" aria-modal="true"', self.source)
         self.assertIn('data-sheet-open="%s"', self.source)
+        self.assertIn('class="ledger-overview token-overview" data-sheet-open="ledger"', self.source)
+        self.assertIn("點擊任意空白處查看完整明細", self.source)
         self.assertIn("Token 使用分析", self.source)
         self.assertIn("各平台 Token", self.source)
         self.assertIn("各專案 Token", self.source)
         self.assertIn('data-window="30d"', self.source)
         self.assertIn('e.key === "Escape"', self.source)
+
+    def test_background_poll_does_not_replace_interactive_webview(self) -> None:
+        refresh_body = self.source.split("function M.refresh()", 1)[1].split("function M.start()", 1)[0]
+        self.assertNotIn("panel:html(buildHTML", refresh_body)
 
     def test_provider_usage_cards_show_reset_date_and_countdown(self) -> None:
         self.assertIn('data-sheet-open="usage-%s"', self.source)
