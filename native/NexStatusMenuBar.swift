@@ -4,7 +4,6 @@ import Foundation
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
-    private var cycle = 0
     private var metrics = ["C—", "G—", "H—"]
     private var tooltip = "NexStatus 正在讀取資料…"
 
@@ -28,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.cycle = (self.cycle + 1) % self.metrics.count
             self.refreshSnapshot()
             self.render()
             self.keepVisible()
@@ -92,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func render() {
         guard let button = statusItem.button else { return }
-        let text = metrics[cycle % metrics.count]
+        let text = metrics.joined(separator: "  ")
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         button.attributedTitle = NSAttributedString(string: text, attributes: [
             .font: font,

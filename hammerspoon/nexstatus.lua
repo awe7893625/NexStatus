@@ -1400,6 +1400,12 @@ local function tokenSourceLineHTML(points, days, label)
       local y = maxTokens > 0 and (82 - value * 70 / maxTokens) or 82
       table.insert(coords, string.format("%.1f,%.1f", x, y))
     end
+    -- SVG polylines with a single point are invisible. For the Today window,
+    -- extend that one measured value across the chart instead of showing blank.
+    if #coords == 1 then
+      local y = coords[1]:match(",([%d%.%-]+)$") or "82"
+      table.insert(coords, string.format("300.0,%s", y))
+    end
     lines = lines .. string.format('<polyline class="source-line %s" points="%s" />', item.class, table.concat(coords, " "))
     legends = legends .. string.format('<div class="source-legend %s-legend"><span>%s</span><b>%s</b><small>%.1f%%</small></div>',
       item.class:gsub("%-line$", ""), esc(item.label), esc(compactNumber(total)), share(total, periodTotal))
@@ -1519,7 +1525,8 @@ local function tokenLedgerOverviewHTML(s)
       <div class="source-strip">%s</div>
       %s
     </section>
-  ]], esc(tostring(ledger.period or "—")), costStrip, kpiHtml, computeTrendLineHTML(trend),
+  ]], esc(tostring(ledger.period or "—")), costStrip, kpiHtml,
+    computeTrendLineHTML(trend) .. tokenSourceLineHTML(trend, 30, "近 30 日主要 Token 來源趨勢"),
     share(week.tokens, month.tokens), topSources, quality)
 end
 
