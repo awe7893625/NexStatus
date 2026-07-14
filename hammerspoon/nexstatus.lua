@@ -1762,12 +1762,12 @@ local function buildHTML(s)
 
   local clMain = cl.ok and (pctText(cl.five_hour_pct) .. " · 5h") or "離線"
   local clSub = cl.ok
-      and string.format("7 日 %s · 重置 %s", pctText(cl.seven_day_pct), fmtReset(cl.five_hour_resets_at))
+      and string.format("7 日 %s · 重置 %s", pctText(cl.seven_day_pct), fmtReset(cl.seven_day_resets_at))
     or (cl.error or "尚無 Claude usage 資料")
 
   local cxMain = cx.ok and (pctText(cx.five_hour_pct) .. " · 5h") or "離線"
   local cxSub = cx.ok
-      and string.format("%s · 7 日 %s · %s", tostring(cx.plan_type or "plan"), pctText(cx.seven_day_pct), fmtReset(cx.five_hour_resets_at))
+      and string.format("%s · 7 日 %s · %s", tostring(cx.plan_type or "plan"), pctText(cx.seven_day_pct), fmtReset(cx.seven_day_resets_at))
     or (cx.error or "尚無 Codex usage 資料")
 
   -- OpenCode Go

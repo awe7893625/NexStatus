@@ -301,13 +301,34 @@ def codex_usage() -> dict[str, Any]:
                 continue
             primary = rl.get("primary") if isinstance(rl.get("primary"), dict) else {}
             secondary = rl.get("secondary") if isinstance(rl.get("secondary"), dict) else {}
+
+            # Codex reports windows generically as primary/secondary; which one is
+            # the 5h vs 7d/weekly bucket is decided by window_minutes, not position.
+            # (Seen in practice: primary alone holding window_minutes=10080/7d with
+            # secondary=null — a naive primary->5h mapping mislabels that as 5h.)
+            five: dict[str, Any] = {}
+            seven: dict[str, Any] = {}
+            for window in (primary, secondary):
+                if not window:
+                    continue
+                minutes = window.get("window_minutes")
+                if isinstance(minutes, (int, float)):
+                    if minutes <= 720:
+                        five = window
+                    else:
+                        seven = window
+                elif not five:
+                    five = window
+                else:
+                    seven = window
+
             return {
                 "ok": True,
                 "source": "codex-session",
-                "five_hour_pct": _pct(primary.get("used_percent")),
-                "seven_day_pct": _pct(secondary.get("used_percent")),
-                "five_hour_resets_at": primary.get("resets_at"),
-                "seven_day_resets_at": secondary.get("resets_at"),
+                "five_hour_pct": _pct(five.get("used_percent")),
+                "seven_day_pct": _pct(seven.get("used_percent")),
+                "five_hour_resets_at": five.get("resets_at"),
+                "seven_day_resets_at": seven.get("resets_at"),
                 "plan_type": rl.get("plan_type"),
                 "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
             }
