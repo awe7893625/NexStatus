@@ -11,6 +11,20 @@ class HammerspoonUIContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = (ROOT / "hammerspoon" / "nexstatus.lua").read_text()
+        cls.native_source = (ROOT / "native" / "NexStatusMenuBar.swift").read_text()
+
+    def test_native_click_opens_original_panel_through_local_notification(self) -> None:
+        self.assertIn("DistributedNotificationCenter.default()", self.native_source)
+        self.assertNotIn("NSPopover", self.native_source)
+        self.assertNotIn("hammerspoon://nexstatus", self.native_source)
+        self.assertIn('hs.distributednotifications.new(function()', self.source)
+        self.assertGreaterEqual(self.source.count("com.nexstatus.open-panel"), 1)
+        self.assertGreaterEqual(self.source.count("M._nativeOpenObserver:stop()"), 2)
+
+    def test_panel_click_is_served_from_prebuilt_cache(self) -> None:
+        self.assertIn("cachedPanelHtml", self.source)
+        self.assertIn("prefsFingerprint", self.source)
+        self.assertIn("needsRebuild", self.source)
 
     def test_token_ledger_is_the_primary_dashboard_section(self) -> None:
         self.assertIn('class="ledger-overview"', self.source)
@@ -64,11 +78,27 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn("Codex Usage", self.source)
         self.assertIn("OpenCode Go Usage", self.source)
         self.assertIn("Grok Usage", self.source)
-        self.assertIn("SuperGrok 共用週額度", self.source)
+        self.assertIn("本週 credits", self.source)
+        self.assertIn("月 credits", self.source)
         self.assertIn("Antigravity Usage", self.source)
         self.assertIn("fmtResetFull", self.source)
         self.assertIn("（台北）", self.source)
         self.assertIn("重置時間", self.source)
+
+    def test_mac_card_opens_host_resource_sheet_with_process_lists(self) -> None:
+        self.assertIn("macHostSheetHTML", self.source)
+        self.assertIn('id="usage-mac-sheet"', self.source)
+        self.assertIn("Mac 資源", self.source)
+        self.assertIn("誰在吃記憶體", self.source)
+        self.assertIn("誰在吃 CPU", self.source)
+        self.assertIn("分類加總", self.source)
+        self.assertIn("top_mem_name", self.source)
+        # Mac card always surfaces Swap (main line + dedicated bar).
+        self.assertIn("Swap", self.source)
+        self.assertIn('label = "Swap"', self.source)
+        self.assertIn("swap_pct", self.source)
+        # Mac card must open the sheet (not usage_sheet=false)
+        self.assertNotIn("usage_sheet = false", self.source)
 
     def test_secondary_sections_are_reorderable_with_pointer_and_button_fallbacks(self) -> None:
         self.assertIn('data-section-id="%s" draggable="false"', self.source)

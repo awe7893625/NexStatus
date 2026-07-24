@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # direct ``python nexstatus/collector.py`` executio
 CACHE_DIR = Path(os.environ.get("NEXSTATUS_CACHE", os.path.expanduser("~/.cache/nexstatus")))
 OUT = CACHE_DIR / "status.json"
 GROK_CACHE = CACHE_DIR / "grok-billing.json"
+GROK_HISTORY = CACHE_DIR / "grok-billing-history.jsonl"
 GO_CACHE = CACHE_DIR / "opencode-go.json"
 CLAUDE_CACHE = CACHE_DIR / "claude-usage.json"
 CLAUDE_STATUS = Path(os.path.expanduser("~/.claude/usage-status.json"))
@@ -37,6 +38,9 @@ CODEX_SESSIONS = Path(os.path.expanduser("~/.codex/sessions"))
 GROK_AUTH = Path(os.path.expanduser("~/.grok/auth.json"))
 OPENCODE_AUTH = Path(os.path.expanduser("~/.local/share/opencode/auth.json"))
 COST_DB = Path(os.environ.get("NEXSTATUS_COST_DB", os.path.expanduser("~/.claude/state/cost.db")))
+GROK_SEATS_ROOT = Path(os.path.expanduser(os.environ.get("GROK_SEATS_ROOT", "~/.grok-seats")))
+GROK_SEAT_CACHES = tuple(CACHE_DIR / f"grok-billing-seat-{n}.json" for n in (1, 2, 3))
+GROK_SEAT_HISTORIES = tuple(CACHE_DIR / f"grok-billing-history-seat-{n}.jsonl" for n in (1, 2, 3))
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 GROK_TTL = 5 * 60  # seconds — billing is monthly, no need to hammer API
@@ -69,7 +73,7 @@ AGY_PATH_MARKERS = (
     "/bin/agy",
     "agy-node",
 )
-KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE)
+KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE, *GROK_SEAT_CACHES)
 
 
 def _now() -> float:
@@ -355,8 +359,176 @@ def _find_rate_limits(obj: Any, depth: int = 0) -> dict[str, Any] | None:
     return None
 
 
+def _grok_week_bounds_utc(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """ISO week Monday 00:00 UTC → next Monday (SuperGrok-style rolling week display)."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    weekday = now.weekday()  # Mon=0
+    start = (now - timedelta(days=weekday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def _append_grok_billing_history(used: float | None, monthly_limit: float | None) -> None:
+    """Append redacted billing point so weekly credit burn can be estimated."""
+    if used is None:
+        return
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts_unix": _now(),
+            "used": float(used),
+            "monthly_limit": float(monthly_limit) if monthly_limit is not None else None,
+        }
+        with GROK_HISTORY.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # keep last ~400 points (~2 weeks at 5-min poll worst case still fine)
+        lines = GROK_HISTORY.read_text(encoding="utf-8").splitlines()
+        if len(lines) > 500:
+            GROK_HISTORY.write_text("\n".join(lines[-400:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _append_grok_billing_history_to(used: float | None, monthly_limit: float | None, path: Path) -> None:
+    """Append redacted billing point to custom history file."""
+    if used is None:
+        return
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts_unix": _now(),
+            "used": float(used),
+            "monthly_limit": float(monthly_limit) if monthly_limit is not None else None,
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > 500:
+            path.write_text("\n".join(lines[-400:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _grok_weekly_from_history(
+    current_used: float | None,
+    monthly_limit: float | None,
+    period_start: str | None = None,
+    period_end: str | None = None,
+    history_path: Path | None = None,
+) -> dict[str, Any]:
+    """Estimate SuperGrok weekly credit use from local billing snapshots.
+
+    CLI /v1/billing only returns *monthly* credits. We persist each fetch and
+    compute week-to-date burn vs a pro-rata weekly share of the monthly pool.
+    """
+    empty = {
+        "weekly_used_pct": None,
+        "weekly_used": None,
+        "weekly_limit": None,
+        "weekly_reset_at": None,
+        "weekly_breakdown": {},
+        "weekly_available": False,
+        "weekly_source": None,
+        "weekly_note": None,
+    }
+    if current_used is None:
+        return empty
+
+    week_start, week_end = _grok_week_bounds_utc()
+    # Pro-rata weekly limit from monthly pool (soft cap for the bar).
+    month_days = 30.0
+    try:
+        if period_start and period_end:
+            ps = datetime.fromisoformat(str(period_start).replace("Z", "+00:00"))
+            pe = datetime.fromisoformat(str(period_end).replace("Z", "+00:00"))
+            month_days = max(1.0, (pe - ps).total_seconds() / 86400.0)
+    except (TypeError, ValueError):
+        pass
+    weekly_limit = None
+    if monthly_limit and monthly_limit > 0:
+        weekly_limit = float(monthly_limit) * 7.0 / month_days
+
+    baseline_used = None
+    baseline_ts = None
+    actual_history_path = history_path if history_path is not None else GROK_HISTORY
+    if actual_history_path.exists():
+        try:
+            for line in actual_history_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                ts_raw = row.get("ts") or ""
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                used_val = row.get("used")
+                if used_val is None:
+                    continue
+                used_f = float(used_val)
+                # only trust snapshots at/before week start as true baseline
+                if ts <= week_start:
+                    baseline_used = used_f
+                    baseline_ts = ts.isoformat()
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    weekly_used = None
+    weekly_source = None
+    weekly_note = None
+
+    if baseline_used is not None:
+        weekly_used = max(0.0, float(current_used) - float(baseline_used))
+        weekly_source = "billing_snapshot_delta"
+        weekly_note = f"本週自 {str(baseline_ts)[:10]} 快照起算 credits 增量"
+    else:
+        # No pre-week snapshot yet: linear burn estimate since billing period start.
+        try:
+            if period_start:
+                ps = datetime.fromisoformat(str(period_start).replace("Z", "+00:00"))
+                days_into = max(1.0, (datetime.now(timezone.utc) - ps).total_seconds() / 86400.0)
+                days_before_week = max(0.0, (week_start - ps).total_seconds() / 86400.0)
+                baseline_est = float(current_used) * (days_before_week / days_into)
+                weekly_used = max(0.0, float(current_used) - baseline_est)
+                weekly_source = "linear_period_estimate"
+                weekly_note = "CLI 無官方週額度；以月 credits 線性估本週用量（週上限=月額×7/月天數）"
+            else:
+                weekly_used = 0.0
+                weekly_source = "billing_snapshot_pending"
+                weekly_note = "週額度估算中（需 billing 快照）"
+        except (TypeError, ValueError):
+            weekly_used = 0.0
+            weekly_source = "billing_snapshot_pending"
+            weekly_note = "週額度估算中"
+
+    used_pct = None
+    if weekly_used is not None and weekly_limit and weekly_limit > 0:
+        used_pct = max(0, min(100, int(round(100.0 * weekly_used / weekly_limit))))
+
+    return {
+        "weekly_used_pct": used_pct,
+        "weekly_used": weekly_used,
+        "weekly_limit": weekly_limit,
+        "weekly_reset_at": week_end.isoformat(),
+        "weekly_breakdown": {},
+        "weekly_available": weekly_limit is not None,
+        "weekly_source": weekly_source,
+        "weekly_note": weekly_note,
+        "weekly_window_start": week_start.isoformat(),
+    }
+
+
 def _grok_weekly_usage(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Extract consumer weekly-pool fields without persisting account details."""
+    """Extract consumer weekly-pool fields without persisting account details.
+
+    Prefer official fields when present; otherwise estimate from local snapshots.
+    """
     weekly = next(
         (
             cfg.get(key)
@@ -395,14 +567,25 @@ def _grok_weekly_usage(cfg: dict[str, Any]) -> dict[str, Any]:
         ),
         None,
     )
-    return {
-        "weekly_used_pct": used_pct,
-        "weekly_used": used,
-        "weekly_limit": limit,
-        "weekly_reset_at": reset_at,
-        "weekly_breakdown": breakdown,
-        "weekly_available": used_pct is not None or reset_at is not None or bool(breakdown),
-    }
+    if used_pct is not None or reset_at is not None or bool(breakdown) or used is not None:
+        return {
+            "weekly_used_pct": used_pct,
+            "weekly_used": used,
+            "weekly_limit": limit,
+            "weekly_reset_at": reset_at,
+            "weekly_breakdown": breakdown,
+            "weekly_available": used_pct is not None or reset_at is not None or bool(breakdown) or used is not None,
+            "weekly_source": "api",
+            "weekly_note": None,
+        }
+
+    # CLI billing currently only exposes monthly pool — estimate week from snapshots.
+    return _grok_weekly_from_history(
+        current_used=_money_val(cfg.get("used")),
+        monthly_limit=_money_val(cfg.get("monthlyLimit")),
+        period_start=cfg.get("billingPeriodStart"),
+        period_end=cfg.get("billingPeriodEnd"),
+    )
 
 
 def grok_usage(force: bool = False) -> dict[str, Any]:
@@ -450,6 +633,16 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
     if used is not None and limit and limit > 0:
         pct = max(0, min(100, int(round(100.0 * used / limit))))
 
+    weekly_fields = _grok_weekly_usage(cfg)
+    # If API had no weekly block, estimate from history using monthly used/limit.
+    if not weekly_fields.get("weekly_available"):
+        weekly_fields = _grok_weekly_from_history(
+            current_used=used,
+            monthly_limit=limit,
+            period_start=cfg.get("billingPeriodStart"),
+            period_end=cfg.get("billingPeriodEnd"),
+        )
+
     result = {
         "ok": True,
         "source": GROK_BILLING_URL,
@@ -464,13 +657,129 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         "unit": "credits",
         "_fetched_at": datetime.now(timezone.utc).isoformat(),
         "_fetched_at_ts": _now(),
-        **_grok_weekly_usage(cfg),
+        **weekly_fields,
     }
+    _append_grok_billing_history(used, limit)
     try:
         _write_cache_json(GROK_CACHE, result)
     except OSError:
         pass
     return result
+
+
+def _seat_email(auth_path: Path) -> str:
+    """Extract email from a grok-seat auth.json without exposing tokens."""
+    data = _read_json(auth_path)
+    if not data:
+        return "(not logged in)"
+    for v in data.values():
+        if isinstance(v, dict) and v.get("email"):
+            return str(v["email"])
+    return "(no email)"
+
+
+def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
+    """Fetch billing for one grok-seat, with per-seat cache and history."""
+    seat_dir = GROK_SEATS_ROOT / str(seat_num)
+    auth_path = seat_dir / "auth.json"
+    cache_path = CACHE_DIR / f"grok-billing-seat-{seat_num}.json"
+    history_path = CACHE_DIR / f"grok-billing-history-seat-{seat_num}.jsonl"
+    
+    email = _seat_email(auth_path)
+    
+    if not auth_path.is_file():
+        return {"ok": False, "seat": seat_num, "email": email, "error": "no auth.json", "active": False}
+    
+    if not force and cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL:
+                cached["seat"] = seat_num
+                cached["email"] = email
+                cached["active"] = True
+                return cached
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    
+    auth = _read_json(auth_path)
+    if not auth:
+        return {"ok": False, "seat": seat_num, "email": email, "error": "invalid auth.json", "active": True}
+    
+    token = None
+    for entry in auth.values():
+        if isinstance(entry, dict) and entry.get("key"):
+            token = entry["key"]
+            break
+    if not token:
+        return {"ok": False, "seat": seat_num, "email": email, "error": "no access token", "active": True}
+    
+    req = urllib.request.Request(
+        GROK_BILLING_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "nexstatus/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=12) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "seat": seat_num, "email": email, "error": f"HTTP {e.code}", "active": True}
+    except Exception as e:
+        return {"ok": False, "seat": seat_num, "email": email, "error": _safe_error(e), "active": True}
+    
+    cfg = body.get("config") if isinstance(body.get("config"), dict) else body
+    used = _money_val(cfg.get("used"))
+    limit = _money_val(cfg.get("monthlyLimit"))
+    pct_val = None
+    if used is not None and limit and limit > 0:
+        pct_val = max(0, min(100, int(round(100.0 * used / limit))))
+    
+    weekly_fields = _grok_weekly_usage(cfg)
+    if not weekly_fields.get("weekly_available"):
+        weekly_fields = _grok_weekly_from_history(
+            current_used=used,
+            monthly_limit=limit,
+            period_start=cfg.get("billingPeriodStart"),
+            period_end=cfg.get("billingPeriodEnd"),
+            history_path=history_path,
+        )
+    
+    result = {
+        "ok": True,
+        "seat": seat_num,
+        "email": email,
+        "active": True,
+        "source": GROK_BILLING_URL,
+        "plan": GROK_PLAN_NAME,
+        "price": f"${GROK_PLAN_PRICE_USD_MO:g}/mo",
+        "used": used,
+        "monthly_limit": limit,
+        "used_pct": pct_val,
+        "on_demand_cap": _money_val(cfg.get("onDemandCap")),
+        "period_start": cfg.get("billingPeriodStart"),
+        "period_end": cfg.get("billingPeriodEnd"),
+        "unit": "credits",
+        "_fetched_at": datetime.now(timezone.utc).isoformat(),
+        "_fetched_at_ts": _now(),
+        **weekly_fields,
+    }
+    
+    _append_grok_billing_history_to(used, limit, history_path)
+    try:
+        _write_cache_json(cache_path, result)
+    except OSError:
+        pass
+    return result
+
+
+def grok_multi_seat_usage(force: bool = False) -> list[dict[str, Any]]:
+    """Collect billing for all grok-seats (1-3)."""
+    seats = []
+    for n in (1, 2, 3):
+        seats.append(_grok_seat_billing(n, force=force))
+    return seats
 
 
 def _money_val(v: Any) -> float | None:
@@ -754,7 +1063,165 @@ def _go_soft_pct(local: dict[str, Any]) -> int:
 
 def host_metrics() -> dict[str, Any]:
     # _mem_info already folds CPU into pressure_pct and returns cpu_pct.
-    return _mem_info()
+    info = _mem_info()
+    try:
+        info.update(_host_process_snapshot())
+    except Exception:  # noqa: BLE001 — process sample must never abort host metrics
+        info.setdefault("top_cpu", [])
+        info.setdefault("top_mem", [])
+        info.setdefault("top_families", [])
+    return info
+
+
+def _proc_short_name(raw: str) -> str:
+    """Basename-only process label — no home paths or args.
+
+    macOS paths often contain spaces (``Google Chrome.app/...``), so we cannot
+    split on the first space. Prefer ``.app`` bundle names; otherwise strip
+    flag-style argv (`` -x``) and take the path basename.
+    """
+    text = (raw or "").strip().strip('"').strip("'")
+    if not text:
+        return "unknown"
+
+    path_token = ""
+    name = text
+    if "/" in text or text.startswith("~"):
+        app = re.search(r"/([^/]+)\.app/", text)
+        if app:
+            name = app.group(1)
+            path_token = text
+        else:
+            # Drop common flag argv: " /path/bin --flag" or " /path/bin -c code"
+            cut = re.split(r"\s+-", text, maxsplit=1)[0].strip()
+            path_token = cut
+            name = Path(cut).name or cut
+    for suffix in (
+        " Helper (Renderer)",
+        " Helper (GPU)",
+        " Helper (Plugin)",
+        " Helper",
+    ):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].rstrip() or name
+    # Collapse noisy Python framework path leftovers.
+    if name in {"Python", "python3", "python"} and path_token:
+        parent = Path(path_token.split(None, 1)[0]).parent.name if path_token else ""
+        # Prefer Xcode / project folder clues from the path.
+        m = re.search(r"/([^/]+)/(?:bin|MacOS)/Python", path_token.replace("\\", "/"))
+        if m and m.group(1) not in {".", "bin", "MacOS", "Versions"}:
+            name = f"Python({m.group(1)})"
+        elif parent and parent not in {".", "bin", "MacOS", "Versions"}:
+            name = f"Python({parent})"
+    return name[:48]
+
+
+def _proc_family(name: str) -> str:
+    low = name.lower()
+    rules: list[tuple[str, tuple[str, ...]]] = [
+        ("本機模型", ("llama", "ollama", "mlx", "mlc", "vllm", "gpt-oss", "qwen")),
+        ("AI CLI / 訂閱", ("claude", "codex", "chatgpt", "agy", "antigravity", "opencode", "grok", "hermes", "nexvoice", "nexpilot", "nexstatus", "fable")),
+        ("瀏覽器", ("chrome", "chromium", "firefox", "safari", "webkit", "arc", "brave", "edge")),
+        ("顯示 / UI", ("windowserver", "dock", "finder", "screencapture", "coregraphics")),
+        ("容器 / VM", ("orbstack", "docker", "vpnkit", "qemu", "virtualization", "utm")),
+        ("模擬器", ("simmetal", "simrender", "simulator", "coresimulator")),
+        ("開發工具", ("node", "bun", "python", "swift", "xcode", "cmux", "cursor", "code", "electron", "java", "ruby", "go", "rustc", "cargo")),
+        ("系統", ("kernel_task", "mds", "syspolicyd", "trustd", "coreaudiod", "assistantd", "siri", "cloudd", "bird", "photolibrary", "spotlight", "launchd")),
+    ]
+    for label, keys in rules:
+        if any(k in low for k in keys):
+            return label
+    return "其他"
+
+
+def _host_process_snapshot(limit_cpu: int = 8, limit_mem: int = 8, limit_families: int = 6) -> dict[str, Any]:
+    """Cheap live top-process sample for the Mac detail sheet."""
+    try:
+        out = subprocess.check_output(
+            ["/bin/ps", "-axo", "pid=,pcpu=,pmem=,rss=,command="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"top_cpu": [], "top_mem": [], "top_families": []}
+
+    rows: list[dict[str, Any]] = []
+    self_pid = os.getpid()
+    skip_names = frozenset({"ps", "top", "memory_pressure", "NexStatusMenuBar"})
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            pid = int(parts[0])
+            cpu = float(parts[1])
+            mem = float(parts[2])
+            rss_kb = int(parts[3])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        name = _proc_short_name(parts[4])
+        if name in skip_names:
+            continue
+        rows.append(
+            {
+                "pid": pid,
+                "name": name,
+                "family": _proc_family(name),
+                "cpu_pct": round(cpu, 1),
+                "mem_pct": round(mem, 1),
+                "rss_mb": round(rss_kb / 1024.0, 1),
+            }
+        )
+
+    def _pack(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        packed: list[dict[str, Any]] = []
+        for item in items:
+            packed.append(
+                {
+                    "pid": item["pid"],
+                    "name": item["name"],
+                    "family": item["family"],
+                    "cpu_pct": item["cpu_pct"],
+                    "mem_pct": item["mem_pct"],
+                    "rss_mb": item["rss_mb"],
+                }
+            )
+        return packed
+
+    top_cpu = _pack(sorted(rows, key=lambda r: r["cpu_pct"], reverse=True)[:limit_cpu])
+    top_mem = _pack(sorted(rows, key=lambda r: r["rss_mb"], reverse=True)[:limit_mem])
+
+    fam_cpu: dict[str, float] = {}
+    fam_rss: dict[str, float] = {}
+    for row in rows:
+        fam = str(row["family"])
+        fam_cpu[fam] = fam_cpu.get(fam, 0.0) + float(row["cpu_pct"])
+        fam_rss[fam] = fam_rss.get(fam, 0.0) + float(row["rss_mb"])
+    families = sorted(
+        (
+            {
+                "name": name,
+                "cpu_pct": round(cpu, 1),
+                "rss_gb": round(fam_rss.get(name, 0.0) / 1024.0, 2),
+            }
+            for name, cpu in fam_cpu.items()
+        ),
+        key=lambda item: (item["rss_gb"], item["cpu_pct"]),
+        reverse=True,
+    )[:limit_families]
+
+    top_mem_name = top_mem[0]["name"] if top_mem else None
+    top_cpu_name = top_cpu[0]["name"] if top_cpu else None
+    return {
+        "top_cpu": top_cpu,
+        "top_mem": top_mem,
+        "top_families": families,
+        "top_mem_name": top_mem_name,
+        "top_cpu_name": top_cpu_name,
+    }
 
 
 def _cpu_pct() -> int:
@@ -816,6 +1283,7 @@ def _mem_info() -> dict[str, Any]:
     used_gb = total_gb * used_pct / 100.0
 
     swap_mb = 0.0
+    swap_total_mb = 0.0
     try:
         out = subprocess.check_output(
             ["/usr/sbin/sysctl", "-n", "vm.swapusage"],
@@ -823,17 +1291,27 @@ def _mem_info() -> dict[str, Any]:
             text=True,
             timeout=2,
         )
-        # ... used = 123.4M ...
-        for part in out.replace("=", " ").split():
-            if part.endswith("M") and part[:-1].replace(".", "", 1).isdigit():
-                # take the "used" one — crude: largest M value after "used"
-                pass
-        if "used" in out:
+        # total = 2048.00M  used = 123.40M  free = 1924.60M  (encrypted)
+        parsed = re.search(
+            r"total\s*=\s*([\d.]+)M.*?used\s*=\s*([\d.]+)M",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if parsed:
+            swap_total_mb = float(parsed.group(1))
+            swap_mb = float(parsed.group(2))
+        elif "used" in out:
             after = out.split("used", 1)[1]
             token = after.replace("=", " ").split()[0]
             swap_mb = float(token.rstrip("M"))
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         swap_mb = 0.0
+        swap_total_mb = 0.0
+    # Bar uses absolute pressure vs 16GB (AI-Mac soft ceiling), NOT used/total of
+    # the encrypted swap file. After a thrash, macOS often keeps a large swap
+    # file (total≈used) so used/total≈90% looks "full" even when free% recovered.
+    swap_pct = int(min(100, round(100.0 * swap_mb / 16384.0))) if swap_mb > 0 else 0
+    swap_pct = max(0, min(100, swap_pct))
 
     pressure = 0
     try:
@@ -859,8 +1337,16 @@ def _mem_info() -> dict[str, Any]:
 
     cpu = _cpu_pct()
     # Single host-load index for MenuBar (hardware pressure, not AI quota weather).
+    # Swap was under-weighted: 32–56GB compressed swap is common on AI Macs and
+    # should move H more than the old flat +8 for any swap ≥2GB.
     pressure_pct = int(round(0.45 * used_pct + 0.25 * cpu + 0.30 * level_score))
-    if swap_mb >= 2048:
+    if swap_mb >= 32768:
+        pressure_pct = min(100, pressure_pct + 22)
+    elif swap_mb >= 16384:
+        pressure_pct = min(100, pressure_pct + 16)
+    elif swap_mb >= 8192:
+        pressure_pct = min(100, pressure_pct + 12)
+    elif swap_mb >= 2048:
         pressure_pct = min(100, pressure_pct + 8)
     elif swap_mb >= 512:
         pressure_pct = min(100, pressure_pct + 4)
@@ -872,6 +1358,8 @@ def _mem_info() -> dict[str, Any]:
         "mem_used_gb": round(used_gb, 1),
         "mem_total_gb": round(total_gb, 0),
         "swap_mb": round(swap_mb, 1),
+        "swap_total_mb": round(swap_total_mb, 1),
+        "swap_pct": swap_pct,
         "pressure": p_label,
         "pressure_level": pressure,
         "pressure_pct": pressure_pct,
@@ -1194,11 +1682,25 @@ def _safe_collect(label: str, function: Any, *args: Any, **kwargs: Any) -> dict[
         return {"ok": False, "error": f"{label}_unavailable"}
 
 
+def _menu_quota_pct(provider: dict[str, Any] | None) -> Any:
+    """Prefer 5h quota for menu chips; fall back to 7d when 5h is unreported."""
+    if not isinstance(provider, dict) or not provider.get("ok"):
+        return None
+    five = provider.get("five_hour_pct")
+    if five is not None:
+        return five
+    return provider.get("seven_day_pct")
+
+
 def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
     host = _safe_collect("host", host_metrics)
     claude = _safe_collect("claude", claude_usage)
     codex = _safe_collect("codex", codex_usage)
     grok = _safe_collect("grok", grok_usage, force=force_remote)
+    try:
+        grok_seats = grok_multi_seat_usage(force=force_remote)
+    except Exception:  # noqa: BLE001
+        grok_seats = []
     go = _safe_collect("opencode_go", opencode_go_usage, force=force_remote)
     agy = _safe_collect("antigravity", antigravity_usage, force=force_remote)
     try:
@@ -1234,9 +1736,11 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    # Compact title pieces for MenuBar / logs
-    cl = claude.get("five_hour_pct") if claude.get("ok") else None
-    cx = codex.get("five_hour_pct") if codex.get("ok") else None
+    # Compact title pieces for MenuBar / logs.
+    # Prefer short 5h window; fall back to 7d when a provider only reports weekly
+    # (Codex currently often emits primary=7d with secondary=null).
+    cl = _menu_quota_pct(claude)
+    cx = _menu_quota_pct(codex)
     go_pct = go.get("used_pct") if go.get("ok") else None
     gk = grok.get("used_pct") if grok.get("ok") else None
     ag = agy.get("used_pct") if agy.get("ok") else None
@@ -1252,7 +1756,7 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         mark = "!" if bang_at is not None and float(v) >= bang_at else ""
         return f"{letter}{mark}{int(v)}%"
 
-    # C/G = AI 5h quota; H = computer pressure index (not AI weather score)
+    # C/G = AI quota (5h preferred, 7d fallback); H = computer pressure index
     title = " ".join(
         [
             chip("C", cl),
@@ -1286,6 +1790,7 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         "codex": codex,
         "opencode_go": go,
         "grok": grok,
+        "grok_seats": grok_seats,
         "antigravity": agy,
         "ledger": ledger,
     }

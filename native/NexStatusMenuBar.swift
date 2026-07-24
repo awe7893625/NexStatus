@@ -70,22 +70,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let claude = dictionary(root["claude"])
         let codex = dictionary(root["codex"])
         let host = dictionary(root["host"])
-        let c = percent(claude["five_hour_pct"])
-        let g = percent(codex["five_hour_pct"])
+        // Prefer 5h; fall back to 7d when provider only reports weekly (Codex often does).
+        let (c, cWindow) = menuQuota(claude)
+        let (g, gWindow) = menuQuota(codex)
         var h = percent(host["pressure_pct"])
         if h == nil {
             let cpu = percent(host["cpu_pct"]) ?? 0
             let mem = percent(host["mem_pct"]) ?? 0
             h = Int((0.45 * Double(cpu) + 0.55 * Double(mem)).rounded())
         }
+        let mem = percent(host["mem_pct"])
+        let swapMb: Double = {
+            if let number = host["swap_mb"] as? NSNumber { return number.doubleValue }
+            if let text = host["swap_mb"] as? String, let value = Double(text) { return value }
+            return 0
+        }()
+        // Compact human size for tooltip only — never "S13935M" on the MenuBar title.
+        let swapLine: String = {
+            if swapMb <= 0 { return "Swap：0" }
+            if swapMb >= 1024 {
+                return String(format: "Swap：%.1f GB", swapMb / 1024.0)
+            }
+            return String(format: "Swap：%.0f MB", swapMb)
+        }()
+
+        // Title stays C / G / H only. Swap is folded into H (collector) and tooltip.
         metrics = [label("C", c), label("G", g), label("H", h, warning: true)]
         tooltip = [
             "NexStatus",
-            "Claude 5h：\(c.map { "\($0)%" } ?? "無資料")",
-            "Codex 5h：\(g.map { "\($0)%" } ?? "無資料")",
+            "Claude \(cWindow)：\(c.map { "\($0)%" } ?? "無資料")",
+            "Codex \(gWindow)：\(g.map { "\($0)%" } ?? "無資料")",
             "電腦壓力：\(h.map { "\($0)%" } ?? "無資料")",
+            "MEM：\(mem.map { "\($0)%" } ?? "無資料")",
+            swapLine,
             "點一下開啟完整面板"
         ].joined(separator: "\n")
+    }
+
+    /// Prefer short 5h window; fall back to 7d so menu is not blank when secondary is null.
+    private func menuQuota(_ provider: [String: Any]) -> (Int?, String) {
+        if let five = percent(provider["five_hour_pct"]) {
+            return (five, "5h")
+        }
+        if let seven = percent(provider["seven_day_pct"]) {
+            return (seven, "7d")
+        }
+        return (nil, "額度")
     }
 
     private func render() {
@@ -119,14 +149,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPanel() {
-        guard let url = URL(string: "hammerspoon://nexstatus") else { return }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = false
-        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
-            if let error {
-                NSLog("NexStatus URL callback failed: %@", error.localizedDescription)
-            }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.openPanel() }
+            return
         }
+
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("com.nexstatus.open-panel"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 }
 

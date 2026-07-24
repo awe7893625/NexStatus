@@ -58,6 +58,72 @@ class SnapshotContractTests(unittest.TestCase):
         for name in ("host", "claude", "codex", "opencode_go", "grok", "antigravity"):
             self.assertIn(name, snapshot)
         self.assertIn("generated_at", snapshot)
+        # Menu chips use 5h when present: C20% G30%
+        self.assertIn("C20%", snapshot["title"])
+        self.assertIn("G30%", snapshot["title"])
+
+    def test_menu_title_falls_back_to_seven_day_when_five_hour_missing(self) -> None:
+        patches = self.base_patches()
+        patches[2] = mock.patch.object(
+            collector,
+            "codex_usage",
+            return_value=provider(five_hour_pct=None, seven_day_pct=2, plan_type="pro"),
+        )
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        snapshot = collector.build_snapshot()
+        self.assertIsNone(snapshot["codex"]["five_hour_pct"])
+        self.assertEqual(snapshot["codex"]["seven_day_pct"], 2)
+        # G should show 7d 2% instead of blank G—%
+        self.assertIn("G2%", snapshot["title"])
+        self.assertIn("G2%", snapshot["title_full"])
+        self.assertNotIn("G—%", snapshot["title"])
+
+    def test_menu_quota_pct_prefers_five_hour(self) -> None:
+        self.assertEqual(
+            collector._menu_quota_pct({"ok": True, "five_hour_pct": 12, "seven_day_pct": 40}),
+            12,
+        )
+        self.assertEqual(
+            collector._menu_quota_pct({"ok": True, "five_hour_pct": None, "seven_day_pct": 7}),
+            7,
+        )
+        self.assertIsNone(collector._menu_quota_pct({"ok": False, "seven_day_pct": 7}))
+        self.assertIsNone(collector._menu_quota_pct({"ok": True}))
+
+    def test_proc_short_name_strips_paths_and_helpers(self) -> None:
+        self.assertEqual(
+            collector._proc_short_name("/Users/ray/.local/ollama-runtime/llama-server --port 11434"),
+            "llama-server",
+        )
+        self.assertEqual(
+            collector._proc_short_name("Google Chrome Helper (Renderer)"),
+            "Google Chrome",
+        )
+        self.assertEqual(
+            collector._proc_short_name(
+                "/Applications/Google Chrome.app/Contents/Frameworks/"
+                "Google Chrome Framework.framework/Versions/149.0.7827.198/Helpers/"
+                "Google Chrome Helper (Renderer).app/Contents/MacOS/"
+                "Google Chrome Helper (Renderer)"
+            ),
+            "Google Chrome",
+        )
+        self.assertEqual(collector._proc_family("llama-server"), "本機模型")
+        self.assertEqual(collector._proc_family("claude"), "AI CLI / 訂閱")
+        self.assertEqual(collector._proc_family("Google Chrome"), "瀏覽器")
+
+    def test_host_process_snapshot_shape(self) -> None:
+        snap = collector._host_process_snapshot(limit_cpu=3, limit_mem=3, limit_families=3)
+        self.assertIn("top_cpu", snap)
+        self.assertIn("top_mem", snap)
+        self.assertIn("top_families", snap)
+        for row in snap["top_cpu"] + snap["top_mem"]:
+            self.assertNotIn("/", row["name"])
+            self.assertIn("cpu_pct", row)
+            self.assertIn("rss_mb", row)
+            self.assertIn("family", row)
 
     def test_one_provider_exception_does_not_abort_snapshot(self) -> None:
         patches = self.base_patches()

@@ -22,6 +22,15 @@ local redrawPanel = nil
 local collectorTask = nil
 local collectorWatchdog = nil
 local refreshQueued = false
+-- Instant-open cache: HTML is pre-built when the collector finishes so a
+-- MenuBar click only has to show the panel, not rebuild the dashboard.
+local cachedPanelHtml = nil
+local cachedSnapMtime = nil
+local cachedPrefsHash = nil
+local panelShown = false
+-- Forward declaration: refreshSnapshot's pre-warm closure runs before the
+-- definition below; without this it would capture a nil global.
+local buildHTML
 
 local HOME = os.getenv("HOME") or ""
 local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Developer/NexStatus")
@@ -595,6 +604,14 @@ end
 
 loadPrefs()
 
+-- Any prefs change must invalidate the cached panel HTML; JSON-encode the
+-- whole table so new prefs fields are covered automatically.
+local function prefsFingerprint()
+  local ok, encoded = pcall(function() return hs.json.encode(prefs) end)
+  if ok and type(encoded) == "string" then return encoded end
+  return tostring(prefs.chart) .. ":" .. tostring(prefs.theme) .. ":" .. tostring(prefs.density)
+end
+
 local function readSnapshot()
   local f = io.open(SNAP, "r")
   if not f then return nil end
@@ -626,7 +643,20 @@ local function refreshSnapshot(forceRemote)
     -- leaves the last known-good dashboard intact.
     if exitCode == 0 then
       if M.refreshTitleOnly then M.refreshTitleOnly() end
-      if redrawPanel then redrawPanel() end
+      if panel and redrawPanel then
+        redrawPanel()
+      else
+        -- Pre-warm HTML cache so the next click is instant
+        pcall(function()
+          local s = readSnapshot()
+          if s and buildHTML then
+            cachedPanelHtml = buildHTML(s)
+            cachedPrefsHash = prefsFingerprint()
+            local attr = hs.fs.attributes(SNAP)
+            if attr then cachedSnapMtime = attr.modification end
+          end
+        end)
+      end
     end
 
     if refreshQueued then
@@ -654,8 +684,26 @@ local function pct(v)
 end
 
 local function pctText(v)
-  if v == nil then return "—" end
-  return string.format("%d%%", v)
+  local n = tonumber(v)
+  if not n then return "—" end
+  -- Quota sources may report fractional percentages (or numeric strings).
+  -- `%d` only accepts an integer in Lua, so round for display explicitly.
+  return string.format("%.0f%%", n)
+end
+
+-- Prefer 5h quota for compact chips/main; fall back to 7d when only weekly is reported
+-- (Codex sessions often emit primary=7d with secondary=null).
+local function primaryQuota(provider)
+  if type(provider) ~= "table" or not provider.ok then
+    return nil, nil
+  end
+  if provider.five_hour_pct ~= nil then
+    return provider.five_hour_pct, "5h"
+  end
+  if provider.seven_day_pct ~= nil then
+    return provider.seven_day_pct, "7d"
+  end
+  return nil, nil
 end
 
 local function fmtReset(ts)
@@ -712,6 +760,84 @@ local function providerUsageSheetHTML(id, title, subtitle, rows, source)
     </section>
   ]], esc(id), esc(id), esc(id), esc(id), esc(title), esc(id), esc(title),
     esc(subtitle or "額度視窗與重置時間"), body, esc(source or "unknown"))
+end
+
+local function hostProcessRowsHTML(title, rows, mode)
+  local body = ""
+  for _, row in ipairs(rows or {}) do
+    local left, right
+    if mode == "family" then
+      left = string.format("%s", tostring(row.name or "—"))
+      right = string.format("CPU %s · RAM %s GB",
+        pctText(row.cpu_pct),
+        (type(row.rss_gb) == "number") and string.format("%.1f", row.rss_gb) or "—")
+    else
+      left = string.format("%s <small class=\"proc-meta\">%s · pid %s</small>",
+        esc(tostring(row.name or "—")),
+        esc(tostring(row.family or "其他")),
+        esc(tostring(row.pid or "—")))
+      right = string.format("CPU %s · %s MB · MEM %s",
+        pctText(row.cpu_pct),
+        (type(row.rss_mb) == "number") and string.format("%.0f", row.rss_mb) or "—",
+        pctText(row.mem_pct))
+    end
+    body = body .. string.format([[
+      <div class="proc-row">
+        <div class="proc-name">%s</div>
+        <div class="proc-stats">%s</div>
+      </div>
+    ]], mode == "family" and esc(left) or left, esc(right))
+  end
+  if body == "" then
+    body = '<div class="detail-empty">目前沒有程序取樣；下次刷新會再試。</div>'
+  end
+  return string.format([[
+    <div class="proc-block">
+      <div class="proc-block-title">%s</div>
+      %s
+    </div>
+  ]], esc(title), body)
+end
+
+local function formatSwapShort(mb)
+  mb = tonumber(mb) or 0
+  if mb <= 0 then return "Swap 0" end
+  if mb >= 1024 then
+    return string.format("Swap %.1f GB", mb / 1024)
+  end
+  return string.format("Swap %.0f MB", mb)
+end
+
+local function macHostSheetHTML(host)
+  host = host or {}
+  local swapText = formatSwapShort(host.swap_mb)
+  local summary = string.format(
+    "壓力 %s · MEM %s（%.1f / %.0f GB）· %s · CPU %s",
+    tostring(host.pressure or "—"):gsub(" 🟢", ""):gsub(" 🟡", ""):gsub(" 🔴", ""),
+    pctText(host.mem_pct),
+    tonumber(host.mem_used_gb) or 0,
+    tonumber(host.mem_total_gb) or 0,
+    swapText,
+    pctText(host.cpu_pct)
+  )
+  local body = hostProcessRowsHTML("誰在吃記憶體（RSS）", host.top_mem, "proc")
+    .. hostProcessRowsHTML("誰在吃 CPU", host.top_cpu, "proc")
+    .. hostProcessRowsHTML("分類加總", host.top_families, "family")
+  return string.format([[
+    <div class="sheet-backdrop" data-sheet-close="usage-mac" aria-hidden="true"></div>
+    <section class="detail-sheet usage-sheet host-sheet" id="usage-mac-sheet" role="dialog" aria-modal="true"
+      aria-labelledby="usage-mac-title" aria-hidden="true">
+      <div class="sheet-grabber"></div>
+      <header class="sheet-head">
+        <div><span>HOST RESOURCES</span><h2 id="usage-mac-title">Mac 資源</h2></div>
+        <button class="sheet-close" type="button" data-sheet-close="usage-mac" aria-label="關閉 Mac 資源明細">×</button>
+      </header>
+      <p class="usage-subtitle">%s</p>
+      <div class="sheet-scroll usage-scroll">%s
+        <div class="meaning-note">即時 ps 取樣（basename only，不含完整路徑）。H 壓力指數 = 記憶體使用 + CPU + 系統 memory pressure + Swap 加權。大模型常駐會同時推高 RSS 與 Swap。</div>
+      </div>
+    </section>
+  ]], esc(summary), body)
 end
 
 local function barColor(v)
@@ -944,9 +1070,11 @@ local function heroRingsHTML(s)
   local cl = s.claude or {}
   local cx = s.codex or {}
   local gk = s.grok or {}
+  local clPct = primaryQuota(cl)
+  local cxPct = primaryQuota(cx)
   local items = {
-    { "C Claude", cl.ok and cl.five_hour_pct or nil, "#D97757" },
-    { "G Codex", cx.ok and cx.five_hour_pct or nil, "#10A37F" },
+    { "C Claude", clPct, "#D97757" },
+    { "G Codex", cxPct, "#10A37F" },
     { "K Grok", gk.ok and gk.used_pct or nil, "#BF5AF2" },
   }
   local mem = pct(host.mem_pct)
@@ -983,8 +1111,8 @@ local function pressureFromSnapshot(s)
     end
   end
   local ag = s.antigravity or {}
-  add("C", "Claude", cl.ok, cl.five_hour_pct)
-  add("G", "Codex", cx.ok, cx.five_hour_pct)
+  add("C", "Claude", cl.ok, primaryQuota(cl))
+  add("G", "Codex", cx.ok, primaryQuota(cx))
   add("O", "OpenCode", go.ok or go.live_status == "capped",
     go.live_status == "capped" and 100 or go.used_pct)
   add("K", "Grok", gk.ok, gk.used_pct)
@@ -1750,7 +1878,7 @@ local function sectionFrame(id, title, content, options)
   ]], esc(id), clickable, content or "", chevron)
 end
 
-local function buildHTML(s)
+buildHTML = function(s)
   s = s or {}
   local host = s.host or {}
   local cl = s.claude or {}
@@ -1760,15 +1888,31 @@ local function buildHTML(s)
   local goLocal = go["local"] or {}
   local goCaps = go.caps or {}
 
-  local clMain = cl.ok and (pctText(cl.five_hour_pct) .. " · 5h") or "離線"
-  local clSub = cl.ok
-      and string.format("7 日 %s · 重置 %s", pctText(cl.seven_day_pct), fmtReset(cl.seven_day_resets_at))
-    or (cl.error or "尚無 Claude usage 資料")
+  local clPct, clWin = primaryQuota(cl)
+  local clMain = cl.ok and (clPct ~= nil and (pctText(clPct) .. " · " .. clWin) or "無資料") or "離線"
+  local clSub
+  if not cl.ok then
+    clSub = cl.error or "尚無 Claude usage 資料"
+  elseif cl.five_hour_pct ~= nil then
+    clSub = string.format("7 日 %s · 重置 %s", pctText(cl.seven_day_pct), fmtReset(cl.seven_day_resets_at))
+  elseif cl.seven_day_pct ~= nil then
+    clSub = string.format("5h 無回報 · 重置 %s", fmtReset(cl.seven_day_resets_at))
+  else
+    clSub = "尚無 Claude usage 資料"
+  end
 
-  local cxMain = cx.ok and (pctText(cx.five_hour_pct) .. " · 5h") or "離線"
-  local cxSub = cx.ok
-      and string.format("%s · 7 日 %s · %s", tostring(cx.plan_type or "plan"), pctText(cx.seven_day_pct), fmtReset(cx.seven_day_resets_at))
-    or (cx.error or "尚無 Codex usage 資料")
+  local cxPct, cxWin = primaryQuota(cx)
+  local cxMain = cx.ok and (cxPct ~= nil and (pctText(cxPct) .. " · " .. cxWin) or "無資料") or "離線"
+  local cxSub
+  if not cx.ok then
+    cxSub = cx.error or "尚無 Codex usage 資料"
+  elseif cx.five_hour_pct ~= nil then
+    cxSub = string.format("%s · 7 日 %s · %s", tostring(cx.plan_type or "plan"), pctText(cx.seven_day_pct), fmtReset(cx.seven_day_resets_at))
+  elseif cx.seven_day_pct ~= nil then
+    cxSub = string.format("%s · 5h 無回報 · %s", tostring(cx.plan_type or "plan"), fmtReset(cx.seven_day_resets_at))
+  else
+    cxSub = "尚無 Codex usage 資料"
+  end
 
   -- OpenCode Go
   local goMain, goSub, goBars
@@ -1805,33 +1949,147 @@ local function buildHTML(s)
     goBars = {}
   end
 
-  local gkMain = gk.ok and (
-      gk.weekly_available and (pctText(gk.weekly_used_pct) .. " · 週額度")
-      or (pctText(gk.used_pct) .. " · 月 credits")
-    ) or "離線"
-  local gkUsed = gk.used and string.format("%.0f", gk.used) or "—"
-  local gkLim = gk.monthly_limit and string.format("%.0f", gk.monthly_limit) or "—"
-  local gkSub = gk.ok and (gk.weekly_available
-      and string.format("本週重置 %s · 月 credits %s / %s",
-        fmtIsoReset(gk.weekly_reset_at), gkUsed, gkLim)
-      or string.format("週額度僅見於 Grok Settings → Usage；CLI API 未提供 · 月 credits %s / %s · %s → %s",
-        gkUsed, gkLim,
-        tostring(gk.period_start or ""):sub(1, 10),
-        tostring(gk.period_end or ""):sub(1, 10)))
-    or (gk.error or "請先 grok login")
-  local gkBars = {}
-  if gk.ok and gk.weekly_available then
-    table.insert(gkBars, { label = "SuperGrok 本週", pct = gk.weekly_used_pct })
-  end
-  if gk.ok then table.insert(gkBars, { label = "月 credits", pct = gk.used_pct }) end
+  -- Grok: multi-seat support (G1/G2/G3). Build per-seat display data.
+  -- Legacy single-seat gk is still used for hero rings and radar.
+  local gkSeats = s.grok_seats or {}
+  local gkSeatCards = {}
+  local gkSeatSheetRows = {}
 
-  local memMain = string.format("MEM %s", pctText(host.mem_pct))
-  local memSub = string.format("%.1f / %.0f GB · Swap %.0f MB · %s · CPU %s",
+  -- Helper: build display data for one grok seat
+  local function buildGrokSeatData(seat)
+    local wPct = seat.weekly_used_pct
+    local wAvail = seat.weekly_available == true or wPct ~= nil
+    local main = seat.ok and (
+        wAvail and (pctText(wPct) .. " · 週 · 月 " .. pctText(seat.used_pct))
+        or (pctText(seat.used_pct) .. " · 月 credits")
+      ) or "離線"
+    local used = seat.used and string.format("%.0f", seat.used) or "—"
+    local lim = seat.monthly_limit and string.format("%.0f", seat.monthly_limit) or "—"
+    local wUsed = seat.weekly_used and string.format("%.0f", seat.weekly_used) or "—"
+    local wLim = seat.weekly_limit and string.format("%.0f", seat.weekly_limit) or "—"
+    local sub
+    if not seat.ok then
+      sub = seat.error or "請先 grok login"
+    elseif wAvail then
+      local srcNote = ""
+      if seat.weekly_source == "billing_snapshot_delta" then
+        srcNote = " · 週=快照增量"
+      elseif seat.weekly_source == "billing_snapshot_pending" then
+        srcNote = " · 週快照累積中"
+      elseif seat.weekly_source == "api" then
+        srcNote = " · 週=官方"
+      end
+      sub = string.format(
+        "週 %s/%s · 重置 %s · 月 %s/%s%s",
+        wUsed, wLim, fmtIsoReset(seat.weekly_reset_at),
+        used, lim, srcNote
+      )
+    else
+      sub = string.format("月 credits %s / %s · %s → %s",
+        used, lim,
+        tostring(seat.period_start or ""):sub(1, 10),
+        tostring(seat.period_end or ""):sub(1, 10))
+    end
+    local bars = {}
+    if seat.ok and wAvail then
+      table.insert(bars, { label = "本週 credits（估）", pct = wPct })
+    end
+    if seat.ok then table.insert(bars, { label = "月 credits", pct = seat.used_pct }) end
+    return { main = main, sub = sub, bars = bars }
+  end
+
+  -- Build per-seat cards and sheet rows
+  for _, seat in ipairs(gkSeats) do
+    if type(seat) == "table" then
+      local n = seat.seat or 0
+      local emailShort = tostring(seat.email or "?"):match("^([^@]+)") or "?"
+      local disp = buildGrokSeatData(seat)
+      table.insert(gkSeatCards, rowHTML({
+        id = "grok-g" .. n,
+        name = "G" .. n .. " " .. esc(emailShort),
+        badge = seat.ok and (seat.price or "SuperGrok") or "離線",
+        accent = n == 1 and "#BF5AF2" or (n == 2 and "#A855F7" or "#9333EA"),
+        main = disp.main,
+        sub = disp.sub,
+        bars = disp.bars,
+      }))
+      -- Sheet detail rows for this seat
+      if seat.ok then
+        table.insert(gkSeatSheetRows, {
+          label = "G" .. n .. " 本週",
+          usage = (seat.weekly_used and seat.weekly_limit)
+            and (string.format("%.0f / %.0f", seat.weekly_used, seat.weekly_limit) .. " · " .. pctText(seat.weekly_used_pct))
+            or pctText(seat.weekly_used_pct),
+          reset = fmtIsoReset(seat.weekly_reset_at),
+        })
+        table.insert(gkSeatSheetRows, {
+          label = "G" .. n .. " 月額",
+          usage = (seat.used and seat.monthly_limit)
+            and (string.format("%.0f / %.0f", seat.used, seat.monthly_limit) .. " · " .. pctText(seat.used_pct))
+            or pctText(seat.used_pct),
+          reset = fmtIsoReset(seat.period_end),
+        })
+      else
+        table.insert(gkSeatSheetRows, {
+          label = "G" .. n,
+          usage = seat.error or "離線",
+          reset = "—",
+        })
+      end
+    end
+  end
+
+  -- Fallback: if no grok_seats data, use legacy single-seat gk
+  if #gkSeatCards == 0 then
+    local gkWeekPct = gk.weekly_used_pct
+    local gkWeekAvail = gk.weekly_available == true or gkWeekPct ~= nil
+    local gkMain = gk.ok and (
+        gkWeekAvail and (pctText(gkWeekPct) .. " · 週 · 月 " .. pctText(gk.used_pct))
+        or (pctText(gk.used_pct) .. " · 月 credits")
+      ) or "離線"
+    local gkUsed = gk.used and string.format("%.0f", gk.used) or "—"
+    local gkLim = gk.monthly_limit and string.format("%.0f", gk.monthly_limit) or "—"
+    local gkWeekUsed = gk.weekly_used and string.format("%.0f", gk.weekly_used) or "—"
+    local gkWeekLim = gk.weekly_limit and string.format("%.0f", gk.weekly_limit) or "—"
+    local gkSub
+    if not gk.ok then
+      gkSub = gk.error or "請先 grok login"
+    elseif gkWeekAvail then
+      gkSub = string.format("週 %s/%s · 月 %s/%s", gkWeekUsed, gkWeekLim, gkUsed, gkLim)
+    else
+      gkSub = string.format("月 credits %s / %s", gkUsed, gkLim)
+    end
+    local gkBars = {}
+    if gk.ok and gkWeekAvail then
+      table.insert(gkBars, { label = "本週 credits（估）", pct = gkWeekPct })
+    end
+    if gk.ok then table.insert(gkBars, { label = "月 credits", pct = gk.used_pct }) end
+    table.insert(gkSeatCards, rowHTML({
+      id = "grok",
+      name = "Grok",
+      badge = gk.price or "SuperGrok $30/mo",
+      accent = "#BF5AF2",
+      main = gkMain,
+      sub = gkSub,
+      bars = gkBars,
+    }))
+    gkSeatSheetRows = {
+      { label = "本週 credits", usage = pctText(gk.weekly_used_pct), reset = fmtIsoReset(gk.weekly_reset_at) },
+      { label = "月 credits", usage = pctText(gk.used_pct), reset = fmtIsoReset(gk.period_end) },
+    }
+  end
+
+  -- Compact main line: GB not "13935 / 15360 MB". Bar uses absolute pressure pct.
+  local swapMain = formatSwapShort(host.swap_mb)
+  local memMain = string.format("H %s · MEM %s · %s",
+    pctText(host.pressure_pct), pctText(host.mem_pct), swapMain)
+  local topMemHint = host.top_mem_name and (" · 最大 " .. tostring(host.top_mem_name)) or ""
+  local memSub = string.format("%.1f / %.0f GB · %s · CPU %s%s",
     host.mem_used_gb or 0,
     host.mem_total_gb or 0,
-    host.swap_mb or 0,
     (host.pressure or "—"):gsub(" 🟢", ""):gsub(" 🟡", ""):gsub(" 🔴", ""),
-    pctText(host.cpu_pct)
+    pctText(host.cpu_pct),
+    topMemHint
   )
 
   local ag = s.antigravity or {}
@@ -1907,15 +2165,7 @@ local function buildHTML(s)
       sub = goSub,
       bars = goBars,
     }),
-    grok = rowHTML({
-      id = "grok",
-      name = "Grok",
-      badge = gk.price or "SuperGrok $30/mo",
-      accent = "#BF5AF2",
-      main = gkMain,
-      sub = gkSub,
-      bars = gkBars,
-    }),
+    grok = table.concat(gkSeatCards, "\n"),
     antigravity = rowHTML({
       id = "antigravity",
       name = "Antigravity",
@@ -1927,14 +2177,15 @@ local function buildHTML(s)
     }),
     mac = rowHTML({
       id = "mac",
-      usage_sheet = false,
       name = "Mac",
       badge = "Mac",
       accent = "#0A84FF",
       main = memMain,
       sub = memSub,
       bars = {
+        { label = "壓力 H", pct = host.pressure_pct },
         { label = "記憶體", pct = host.mem_pct },
+        { label = "Swap", pct = host.swap_pct or 0 },
         { label = "CPU", pct = host.cpu_pct },
       },
     }),
@@ -2002,11 +2253,12 @@ local function buildHTML(s)
     .. providerUsageSheetHTML("go", "OpenCode Go Usage", tostring(go.limit_name or "官方額度"), {
       { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
     }, go.live_status == "capped" and "OpenCode 官方 429" or "本機成本帳估算")
-    .. providerUsageSheetHTML("grok", "Grok Usage", "SuperGrok 共用週額度與月 credits", {
-      { label = "SuperGrok 共用週額度", usage = pctText(gk.weekly_used_pct), reset = fmtIsoReset(gk.weekly_reset_at) },
-      { label = "月額度", usage = pctText(gk.used_pct), reset = fmtIsoReset(gk.period_end) },
-    }, gk.source)
+    .. providerUsageSheetHTML("grok", "Grok Usage · 多帳號",
+      "G1/G2/G3 週額度 + 月 credits（週=官方或本機 billing 快照估）",
+      gkSeatSheetRows,
+      gk.source or gk.weekly_note)
     .. providerUsageSheetHTML("antigravity", "Antigravity Usage", "各模型視窗", agRows, ag.source)
+    .. macHostSheetHTML(host)
   local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s)
     .. providerSheets .. layoutReorderSheetHTML()
 
@@ -2849,6 +3101,22 @@ local function buildHTML(s)
   .usage-window-row span,.usage-window-row strong,.usage-window-row b { display:block; }
   .usage-window-row span { color:var(--sub); font-size:10px; }
   .usage-window-row strong { margin-top:5px; font-size:22px; font-variant-numeric:tabular-nums; }
+  .host-sheet .proc-block { margin-bottom: 14px; }
+  .host-sheet .proc-block-title {
+    font-size: 11px; font-weight: 650; letter-spacing: .02em;
+    color: var(--sub); margin: 4px 2px 8px;
+  }
+  .host-sheet .proc-row {
+    display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,.9fr);
+    gap: 10px; align-items: baseline;
+    padding: 10px 12px; margin-bottom: 6px;
+    border-radius: 14px; background: var(--fill); border: .5px solid var(--hairline);
+  }
+  .host-sheet .proc-name { font-size: 13px; font-weight: 600; color: var(--text); min-width: 0; }
+  .host-sheet .proc-name .proc-meta { display:block; margin-top: 3px; font-size: 10px; font-weight: 500; color: var(--sub); }
+  .host-sheet .proc-stats {
+    text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--sub);
+  }
   .usage-reset { text-align:right; }
   .usage-reset b { margin-top:5px; font-size:11px; line-height:1.45; font-variant-numeric:tabular-nums; }
   .detail-empty, .meaning-note { padding: 11px; border-radius: 14px; color: var(--sub); background: var(--fill-2); font-size: 11px; line-height: 1.45; }
@@ -3452,6 +3720,7 @@ end
 local panelFadeTimer = nil
 
 local function hidePanel()
+  panelShown = false
   if not panel then return end
   if panelFadeTimer then
     panelFadeTimer:stop()
@@ -3479,13 +3748,17 @@ local suppressOutsideUntil = 0
 
 redrawPanel = function()
   if not panel then return end
-  local visible = false
+  local html = buildHTML(readSnapshot())
+  cachedPanelHtml = html
+  cachedPrefsHash = prefsFingerprint()
   pcall(function()
-    local w = panel:hswindow()
-    visible = w and w:isVisible() or false
+    local attr = hs.fs.attributes(SNAP)
+    if attr then cachedSnapMtime = attr.modification end
   end)
-  panel:html(buildHTML(readSnapshot()))
-  if visible then
+  -- Only push into the WebView when the panel is actually on screen; hidden
+  -- panels are served from the cache on the next click instead.
+  if panelShown then
+    panel:html(html)
     pcall(function() panel:alpha(1) end)
   end
 end
@@ -3718,41 +3991,62 @@ end
 
 local function showPanel()
   refreshSnapshot(false)
-  local s = readSnapshot()
-  local html = buildHTML(s)
-  ensurePanel()
-  if panelFadeTimer then
-    panelFadeTimer:stop()
-    panelFadeTimer = nil
-  end
-  panel:html(html)
-  positionPanel()
-  -- Soft open: avoid hard pop-in under the MenuBar.
-  pcall(function() panel:alpha(0) end)
-  panel:show()
-  -- hs.webview may ignore a frame change while hidden after display topology
-  -- changes. Reapply once its NSWindow exists and is visible.
-  positionPanel()
-  panel:bringToFront(true)
-  if panel.alpha then
-    local steps, i = 7, 0
-    panelFadeTimer = hs.timer.doEvery(0.016, function()
-      i = i + 1
-      local a = i / steps
-      pcall(function() panel:alpha(math.min(1, a)) end)
-      if i >= steps then
-        if panelFadeTimer then panelFadeTimer:stop(); panelFadeTimer = nil end
-        pcall(function() panel:alpha(1) end)
-      end
+  local ok, err = pcall(function()
+    local snapMtime = nil
+    pcall(function()
+      local attr = hs.fs.attributes(SNAP)
+      if attr then snapMtime = attr.modification end
     end)
-  else
-    pcall(function() panel:alpha(1) end)
-  end
-  -- Grace period: MenuBar click is outside the panel frame; without this,
-  -- the outside-dismiss eventtap closes the dashboard on the same click.
-  suppressOutsideUntil = hs.timer.secondsSinceEpoch() + 0.65
-  if panel.hswindow and panel:hswindow() then
-    pcall(function() panel:hswindow():focus() end)
+    local pf = prefsFingerprint()
+    local needsRebuild = not cachedPanelHtml
+      or snapMtime ~= cachedSnapMtime
+      or pf ~= cachedPrefsHash
+    ensurePanel()
+    if panelFadeTimer then
+      panelFadeTimer:stop()
+      panelFadeTimer = nil
+    end
+    if needsRebuild then
+      local s = readSnapshot()
+      cachedPanelHtml = buildHTML(s)
+      cachedSnapMtime = snapMtime
+      cachedPrefsHash = pf
+      hs.printf("[nexstatus] panel HTML rebuilt (snap=%s)", tostring(snapMtime))
+    end
+    panel:html(cachedPanelHtml)
+    positionPanel()
+    -- Soft open: avoid hard pop-in under the MenuBar.
+    pcall(function() panel:alpha(0) end)
+    panel:show()
+    panelShown = true
+    -- hs.webview may ignore a frame change while hidden after display topology
+    -- changes. Reapply once its NSWindow exists and is visible.
+    positionPanel()
+    panel:bringToFront(true)
+    if panel.alpha then
+      local steps, i = 7, 0
+      panelFadeTimer = hs.timer.doEvery(0.016, function()
+        i = i + 1
+        local a = i / steps
+        pcall(function() panel:alpha(math.min(1, a)) end)
+        if i >= steps then
+          if panelFadeTimer then panelFadeTimer:stop(); panelFadeTimer = nil end
+          pcall(function() panel:alpha(1) end)
+        end
+      end)
+    else
+      pcall(function() panel:alpha(1) end)
+    end
+    -- Grace period: MenuBar click is outside the panel frame; without this,
+    -- the outside-dismiss eventtap closes the dashboard on the same click.
+    suppressOutsideUntil = hs.timer.secondsSinceEpoch() + 0.65
+    if panel.hswindow and panel:hswindow() then
+      pcall(function() panel:hswindow():focus() end)
+    end
+  end)
+  if not ok then
+    hs.printf("[nexstatus] showPanel error: %s", tostring(err))
+    hs.alert.show("NexStatus: 面板開啟失敗，請重新整理", 3)
   end
   hs.printf("[nexstatus] dashboard shown")
 end
@@ -3843,6 +4137,9 @@ function M.refreshTitleOnly()
   local gk = s.grok or {}
 
   -- Main bar: C=Claude · G=Code/Codex · K=Grok · A=Antigravity
+  -- Quota chips prefer 5h, fall back to 7d when short window is unreported.
+  local clMenuPct, clMenuWin = primaryQuota(cl)
+  local cxMenuPct, cxMenuWin = primaryQuota(cx)
   local function chip(letter, ok, val)
     if not ok or val == nil then
       return letter .. "—%"
@@ -3852,8 +4149,8 @@ function M.refreshTitleOnly()
 
   local ag = s.antigravity or {}
   local parts = {
-    chip("C", cl.ok, cl.five_hour_pct),
-    chip("G", cx.ok, cx.five_hour_pct),
+    chip("C", cl.ok, clMenuPct),
+    chip("G", cx.ok, cxMenuPct),
     chip("K", gk.ok, gk.used_pct),
   }
   if ag.ok then
@@ -3876,8 +4173,8 @@ function M.refreshTitleOnly()
   end
   local body = string.format(
     "C%s G%s K%s",
-    short(cl.ok, cl.five_hour_pct),
-    short(cx.ok, cx.five_hour_pct),
+    short(cl.ok, clMenuPct),
+    short(cx.ok, cxMenuPct),
     short(gk.ok, gk.used_pct)
   )
   if ag.ok then
@@ -3887,7 +4184,7 @@ function M.refreshTitleOnly()
     body = body .. " M" .. tostring(mem)
   end
   local pr = pressureFromSnapshot(s)
-  -- MenuBar: C=Claude 5h · G=Codex 5h · H=host pressure index (CPU+MEM+vm pressure).
+  -- MenuBar: C/G = AI quota (5h preferred, 7d fallback) · H = host pressure.
   -- H is hardware load — not the AI quota weather score shown inside the panel radar.
   local function menuPct(ok, value)
     if not ok or value == nil then return "—" end
@@ -3903,23 +4200,45 @@ function M.refreshTitleOnly()
   hostLoad = math.max(0, math.min(100, math.floor(hostLoad + 0.5)))
   local hostLabel = (hostLoad >= 80 and "H!" or "H") .. tostring(hostLoad) .. "%"
   local menuMetrics = {
-    "C" .. menuPct(cl.ok, cl.five_hour_pct),
-    "G" .. menuPct(cx.ok, cx.five_hour_pct),
+    "C" .. menuPct(cl.ok, clMenuPct),
+    "G" .. menuPct(cx.ok, cxMenuPct),
     hostLabel,
   }
   local title = menuMetrics[(math.floor(os.time() / 3) % #menuMetrics) + 1]
+  local swapTip = (swap >= 1024)
+    and string.format("%.1f GB", swap / 1024)
+    or string.format("%.0f MB", swap)
   local tip = string.format(
-    "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %.0f MB\nAI 額度雷達 %d · %s\nC = Claude 5h %s\nG = Codex 5h %s\nK = Grok %s\nA = Antigravity %s (%s)\nOpenCode Go %s\n點一下開啟儀表板",
+    "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %s\nAI 額度雷達 %d · %s\nC = Claude %s %s\nG = Codex %s %s\n%s\nA = Antigravity %s (%s)\nOpenCode Go %s\n點一下開啟完整面板",
     hostLoad,
     tostring(host.pressure or "—"):gsub(" 🟢", ""):gsub(" 🟡", ""):gsub(" 🔴", ""),
     pctText(host.cpu_pct),
     pctText(mem),
-    swap,
+    swapTip,
     pr.score,
     pr.weather,
-    pctText(cl.five_hour_pct),
-    pctText(cx.five_hour_pct),
-    pctText(gk.used_pct),
+    clMenuWin or "額度",
+    pctText(clMenuPct),
+    cxMenuWin or "額度",
+    pctText(cxMenuPct),
+    -- Multi-seat Grok tooltip
+    (function()
+      local gkLines = {}
+      local seats = s.grok_seats or {}
+      if #seats > 0 then
+        for _, seat in ipairs(seats) do
+          if type(seat) == "table" then
+            local n = seat.seat or 0
+            local emailShort = tostring(seat.email or "?"):match("^([^@]+)") or "?"
+            table.insert(gkLines, string.format("K%d = G%d %s %s", n, n, emailShort, pctText(seat.used_pct)))
+          end
+        end
+      end
+      if #gkLines == 0 then
+        return "K = Grok " .. pctText(gk.used_pct)
+      end
+      return table.concat(gkLines, "\n")
+    end)(),
     pctText(ag.used_pct or ag.session_used_pct),
     tostring(ag.plan or "—"),
     pctText(go.used_pct)
@@ -3959,10 +4278,35 @@ function M.start()
     collectorTask = nil
   end
   refreshQueued = false
+  if M._nativeOpenObserver then pcall(function() M._nativeOpenObserver:stop() end); M._nativeOpenObserver = nil end
 
-  -- Native Menu Bar app uses this permission-free callback to open the panel.
-  hs.urlevent.bind("nexstatus", function()
-    M.openPanel()
+  -- Native Menu Bar app posts a distributed notification on click; this is
+  -- faster and more reliable than the hammerspoon:// URL round-trip.
+  local observerOK, observerOrError = pcall(function()
+    local observer = hs.distributednotifications.new(function()
+      hs.settings.set("nexstatusNativeObserverStatus", "received")
+      local openOK, openError = pcall(function() M.openPanel() end)
+      hs.settings.set(
+        "nexstatusNativeObserverStatus",
+        openOK and "opened" or ("open-error: " .. tostring(openError))
+      )
+    end, "com.nexstatus.open-panel")
+    observer:start()
+    return observer
+  end)
+  if observerOK then
+    M._nativeOpenObserver = observerOrError
+    hs.settings.set("nexstatusNativeObserverStatus", "ready")
+  else
+    hs.settings.set("nexstatusNativeObserverStatus", "observer-error: " .. tostring(observerOrError))
+  end
+
+  -- Keep the URL callback as a fallback, but a broken LaunchServices mapping
+  -- must not prevent the local notification bridge from starting.
+  pcall(function()
+    hs.urlevent.bind("nexstatus", function()
+      M.openPanel()
+    end)
   end)
 
   if item then
@@ -4049,6 +4393,11 @@ function M.stop()
   end
   if M._watch then pcall(function() M._watch:stop() end); M._watch = nil end
   if M._tap then pcall(function() M._tap:stop() end); M._tap = nil end
+  if M._nativeOpenObserver then pcall(function() M._nativeOpenObserver:stop() end); M._nativeOpenObserver = nil end
+  panelShown = false
+  cachedPanelHtml = nil
+  cachedSnapMtime = nil
+  cachedPrefsHash = nil
   if panel then
     pcall(function() panel:delete() end)
     panel = nil
