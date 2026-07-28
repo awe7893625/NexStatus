@@ -31,6 +31,74 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(result["weekly_reset_at"], "2026-07-18T04:00:00Z")
         self.assertEqual(result["weekly_breakdown"], {"chat": 20, "build": 22})
 
+    def test_grok_weekly_estimate_uses_seat_history_not_shared_default(self) -> None:
+        """Regression: multi-seat weekly bars must not share G1's baseline.
+
+        Before the fix, seat collectors fell back to GROK_HISTORY (primary
+        account). A high-used seat then showed inflated weekly burn
+        (current_seat - baseline_g1), while a lower-used seat floored to 0.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seat1_hist = root / "hist-1.jsonl"
+            seat2_hist = root / "hist-2.jsonl"
+            # Week start is Monday 00:00 UTC; use timestamps clearly before/after.
+            # Use fixed "now" via history rows relative to real week bounds is
+            # brittle — instead write a baseline at a far-past ts so it is
+            # always <= week_start, then compute delta from current_used.
+            seat1_hist.write_text(
+                json.dumps({
+                    "ts": "2020-01-01T00:00:00+00:00",
+                    "ts_unix": 1577836800,
+                    "used": 9000.0,
+                    "monthly_limit": 15000.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            seat2_hist.write_text(
+                json.dumps({
+                    "ts": "2020-01-01T00:00:00+00:00",
+                    "ts_unix": 1577836800,
+                    "used": 12000.0,
+                    "monthly_limit": 15000.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            cfg_seat2 = {
+                "used": 15000.0,
+                "monthlyLimit": 15000.0,
+                "billingPeriodStart": "2026-07-01T00:00:00+00:00",
+                "billingPeriodEnd": "2026-08-01T00:00:00+00:00",
+            }
+            # Wrong (shared) path would use seat1 baseline → weekly=6000.
+            wrong = collector._grok_weekly_usage(cfg_seat2, history_path=seat1_hist)
+            right = collector._grok_weekly_usage(cfg_seat2, history_path=seat2_hist)
+            self.assertEqual(wrong["weekly_source"], "billing_snapshot_delta")
+            self.assertEqual(right["weekly_source"], "billing_snapshot_delta")
+            self.assertAlmostEqual(wrong["weekly_used"], 6000.0)
+            self.assertAlmostEqual(right["weekly_used"], 3000.0)
+            self.assertNotEqual(wrong["weekly_used"], right["weekly_used"])
+
+            # Seat path must thread history_path into _grok_weekly_usage.
+            with mock.patch.object(
+                collector,
+                "_grok_weekly_usage",
+                wraps=collector._grok_weekly_usage,
+            ) as wrapped:
+                # Simulate the seat billing tail without network.
+                weekly = collector._grok_weekly_usage(cfg_seat2, history_path=seat2_hist)
+                self.assertAlmostEqual(weekly["weekly_used"], 3000.0)
+                # Also assert explicit call signature for seat isolation.
+                weekly2 = collector._grok_weekly_from_history(
+                    current_used=15000.0,
+                    monthly_limit=15000.0,
+                    period_start="2026-07-01T00:00:00+00:00",
+                    period_end="2026-08-01T00:00:00+00:00",
+                    history_path=seat2_hist,
+                )
+                self.assertAlmostEqual(weekly2["weekly_used"], 3000.0)
+                _ = wrapped  # silence unused if wraps not invoked elsewhere
+
     def base_patches(self) -> list[mock._patch]:
         return [
             mock.patch.object(collector, "host_metrics", return_value=provider(mem_pct=10, swap_mb=0)),

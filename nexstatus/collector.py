@@ -524,10 +524,15 @@ def _grok_weekly_from_history(
     }
 
 
-def _grok_weekly_usage(cfg: dict[str, Any]) -> dict[str, Any]:
+def _grok_weekly_usage(
+    cfg: dict[str, Any],
+    history_path: Path | None = None,
+) -> dict[str, Any]:
     """Extract consumer weekly-pool fields without persisting account details.
 
     Prefer official fields when present; otherwise estimate from local snapshots.
+    Pass history_path for multi-seat isolation — never share one seat's baseline
+    with another (wrong baselines inflate/deflate weekly bars).
     """
     weekly = next(
         (
@@ -580,11 +585,13 @@ def _grok_weekly_usage(cfg: dict[str, Any]) -> dict[str, Any]:
         }
 
     # CLI billing currently only exposes monthly pool — estimate week from snapshots.
+    # history_path must be seat-specific when called from multi-seat collectors.
     return _grok_weekly_from_history(
         current_used=_money_val(cfg.get("used")),
         monthly_limit=_money_val(cfg.get("monthlyLimit")),
         period_start=cfg.get("billingPeriodStart"),
         period_end=cfg.get("billingPeriodEnd"),
+        history_path=history_path,
     )
 
 
@@ -736,7 +743,9 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     if used is not None and limit and limit > 0:
         pct_val = max(0, min(100, int(round(100.0 * used / limit))))
     
-    weekly_fields = _grok_weekly_usage(cfg)
+    # Always pass this seat's history — default GROK_HISTORY is a different
+    # account and will poison weekly deltas (G2 inflated / G3 floored to 0).
+    weekly_fields = _grok_weekly_usage(cfg, history_path=history_path)
     if not weekly_fields.get("weekly_available"):
         weekly_fields = _grok_weekly_from_history(
             current_used=used,
