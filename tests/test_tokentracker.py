@@ -280,6 +280,26 @@ class TestTokenTracker(unittest.TestCase):
                 self.assertEqual(res["status"], "incompatible")
                 self.assertEqual(res["error"], "tokentracker_oversized")
 
+    def test_isoformat_z_suffix_python39_compatibility(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_file = Path(tmpdir) / "queue.jsonl"
+            record = {
+                "source": "src-z",
+                "model": "model-z",
+                "hour_start": "2026-07-28T03:00:00Z",
+                "total_tokens": 150,
+                "conversation_count": 2,
+            }
+            with open(queue_file, "w", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
+            res = local_integrations.tokentracker_usage(
+                queue_path=queue_file, now=self.now
+            )
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["status"], "live")
+            self.assertEqual(res["malformed_rows"], 0)
+            self.assertEqual(res["today"]["tokens"], 150)
 
 if __name__ == "__main__":
     unittest.main()

@@ -184,7 +184,8 @@ def tokentracker_usage(
             continue
 
         try:
-            dt_bucket = datetime.fromisoformat(hour_start)
+            hs = hour_start.replace("Z", "+00:00") if hour_start.endswith("Z") else hour_start
+            dt_bucket = datetime.fromisoformat(hs)
             if dt_bucket.tzinfo is None:
                 malformed_count += 1
                 continue
