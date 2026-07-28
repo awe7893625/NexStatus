@@ -109,6 +109,26 @@ class SnapshotContractTests(unittest.TestCase):
             mock.patch.object(collector, "antigravity_usage", return_value=provider(used_pct=60)),
             mock.patch.object(
                 collector,
+                "tokentracker_usage",
+                return_value=provider(
+                    status="live",
+                    today={"tokens": 10, "conversations": 1},
+                    rolling_7d={"tokens": 20, "conversations": 2},
+                    rolling_30d={"tokens": 30, "conversations": 3},
+                    sources_30d=[],
+                ),
+            ),
+            mock.patch.object(
+                collector,
+                "rag_status",
+                return_value=provider(
+                    status="online",
+                    inventory_status="live",
+                    documents={"total": 2, "completed": 2, "queued": 0, "processing": 0, "failed": 0},
+                ),
+            ),
+            mock.patch.object(
+                collector,
                 "collect_ledger_summary",
                 return_value={"schema_version": 2, "ok": True, "status": "live"},
             ),
@@ -123,12 +143,31 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(snapshot["schema_version"], 2)
         self.assertEqual(snapshot["ledger"]["schema_version"], 2)
         self.assertEqual(snapshot["ledger"]["status"], "live")
-        for name in ("host", "claude", "codex", "opencode_go", "grok", "antigravity"):
+        for name in ("host", "claude", "codex", "opencode_go", "grok", "antigravity", "tokentracker", "rag"):
             self.assertIn(name, snapshot)
+        self.assertEqual(snapshot["tokentracker"]["status"], "live")
+        self.assertEqual(snapshot["rag"]["status"], "online")
+        self.assertEqual(snapshot["rag"]["documents"]["total"], 2)
         self.assertIn("generated_at", snapshot)
         # Menu chips use 5h when present: C20% G30%
         self.assertIn("C20%", snapshot["title"])
         self.assertIn("G30%", snapshot["title"])
+
+    def test_tokentracker_and_rag_exceptions_handled_gracefully(self) -> None:
+        patches = self.base_patches()
+        # Find index of tokentracker_usage and rag_status patches by object name
+        patches[6] = mock.patch.object(collector, "tokentracker_usage", side_effect=RuntimeError("private tokentracker secret"))
+        patches[7] = mock.patch.object(collector, "rag_status", side_effect=RuntimeError("private rag secret"))
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        snapshot = collector.build_snapshot()
+        self.assertTrue(snapshot["ok"])
+        self.assertEqual(snapshot["tokentracker"], {"ok": False, "error": "tokentracker_unavailable"})
+        self.assertEqual(snapshot["rag"], {"ok": False, "error": "rag_unavailable"})
+        snapshot_json = json.dumps(snapshot)
+        self.assertNotIn("private tokentracker secret", snapshot_json)
+        self.assertNotIn("private rag secret", snapshot_json)
 
     def test_menu_title_falls_back_to_seven_day_when_five_hour_missing(self) -> None:
         patches = self.base_patches()

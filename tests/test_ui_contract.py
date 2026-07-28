@@ -163,6 +163,26 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn("穩定匿名歸因單位", self.source)
         self.assertIn('sheetName + "-sheet"', self.source)
 
+    def test_tokentracker_and_rag_cards_ui_contract(self) -> None:
+        self.assertIn('name = "TokenTracker"', self.source)
+        self.assertIn('name = "私有知識庫"', self.source)
+        self.assertIn("compactNumber(today.tokens)", self.source)
+        self.assertIn("compactNumber(r7d.tokens)", self.source)
+        self.assertIn("local docs = rag.documents or {}", self.source)
+        self.assertIn("docs.completed", self.source)
+        self.assertIn("docs.queued", self.source)
+        self.assertIn("docs.processing", self.source)
+        self.assertGreaterEqual(self.source.count("static_card = true"), 2)
+        self.assertNotIn("tt.error", self.source)
+        self.assertNotIn("rag.error", self.source)
+
+        card_section = self.source.split("local tt =")[1].split("local orderedProviders =")[0]
+        self.assertNotIn("data-sheet-open", card_section)
+
+        mac_card_block = self.source.split('id = "mac"', 1)[1].split("})", 1)[0]
+        self.assertNotIn("static_card = true", mac_card_block)
+
+
 
 class InstallerContractTests(unittest.TestCase):
     @classmethod

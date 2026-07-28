@@ -1033,7 +1033,7 @@ local function rowHTML(opts)
   end
   local openAttrs = ""
   local chevron = ""
-  if opts.usage_sheet ~= false then
+  if opts.static_card ~= true then
     openAttrs = string.format(' data-sheet-open="usage-%s" tabindex="0" role="button" aria-label="開啟 %s Usage 與重置時間"',
       esc(opts.id or "unknown"), esc(opts.name or "Usage"))
     chevron = '<span class="usage-chevron" aria-hidden="true">›</span>'
@@ -2190,11 +2190,76 @@ buildHTML = function(s)
       },
     }),
   }
+  local tt = s.tokentracker or {}
+  local ttBadge, ttMain, ttSub
+  if tt.ok then
+    ttBadge = (tt.status == "stale") and "Stale" or "Live"
+    local today = tt.today or {}
+    local r7d = tt.rolling_7d or {}
+    local r30d = tt.rolling_30d or {}
+    ttMain = string.format("今日 %s · 7日 %s", compactNumber(today.tokens), compactNumber(r7d.tokens))
+    ttSub = string.format("30日 %s · %s conversations", compactNumber(r30d.tokens), tostring(r30d.conversations or "0"))
+  else
+    ttBadge = "Local"
+    ttMain = "尚無資料"
+    local status = tostring(tt.status or "")
+    if status == "missing" then
+      ttSub = "等待 TokenTracker 同步"
+    elseif status == "incompatible" then
+      ttSub = "TokenTracker 資料格式不相容"
+    else
+      ttSub = "TokenTracker 暫時無法讀取"
+    end
+  end
+
+  local tokenTrackerCard = rowHTML({
+    id = "tokentracker",
+    name = "TokenTracker",
+    badge = ttBadge,
+    accent = "#AF52DE",
+    main = ttMain,
+    sub = ttSub,
+    static_card = true,
+  })
+
+  local rag = s.rag or {}
+  local ragBadge, ragMain, ragSub
+  if rag.ok then
+    ragBadge = "Local"
+    local docs = rag.documents or {}
+    ragMain = string.format("Online · %s 份文件", tostring(docs.total or "0"))
+    ragSub = string.format("完成 %s · 排隊 %s · 處理中 %s · %s ms",
+      tostring(docs.completed or "0"),
+      tostring(docs.queued or "0"),
+      tostring(docs.processing or "0"),
+      tostring(rag.latency_ms or "0")
+    )
+  else
+    ragBadge = "Local"
+    ragMain = "Offline"
+    local status = tostring(rag.status or "")
+    if status == "invalid_config" then
+      ragSub = "本機 RAG 位址設定無效"
+    else
+      ragSub = "等待 127.0.0.1:8220"
+    end
+  end
+
+  local ragCard = rowHTML({
+    id = "rag",
+    name = "私有知識庫",
+    badge = ragBadge,
+    accent = "#30D158",
+    main = ragMain,
+    sub = ragSub,
+    static_card = true,
+  })
+
   local orderedProviders = {}
   for _, id in ipairs(normalizedTileOrder("providers", prefs.provider_order)) do
     if providerCards[id] then table.insert(orderedProviders, providerCards[id]) end
   end
-  local cards = table.concat(orderedProviders, "\n")
+  local cards = table.concat({ tokenTrackerCard, ragCard, table.concat(orderedProviders, "\n") }, "\n")
 
   local updated = ""
   if s.polled_at then

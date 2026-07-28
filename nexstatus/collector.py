@@ -25,6 +25,11 @@ try:
 except ModuleNotFoundError:  # direct ``python nexstatus/collector.py`` execution
     from ledger import collect_ledger_summary
 
+try:
+    from nexstatus.local_integrations import rag_status, tokentracker_usage
+except ModuleNotFoundError:
+    from local_integrations import rag_status, tokentracker_usage
+
 CACHE_DIR = Path(os.environ.get("NEXSTATUS_CACHE", os.path.expanduser("~/.cache/nexstatus")))
 OUT = CACHE_DIR / "status.json"
 GROK_CACHE = CACHE_DIR / "grok-billing.json"
@@ -1712,6 +1717,8 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         grok_seats = []
     go = _safe_collect("opencode_go", opencode_go_usage, force=force_remote)
     agy = _safe_collect("antigravity", antigravity_usage, force=force_remote)
+    tokentracker = _safe_collect("tokentracker", tokentracker_usage)
+    rag = _safe_collect("rag", rag_status)
     try:
         ledger = collect_ledger_summary(COST_DB)
         if not isinstance(ledger, dict):
@@ -1801,6 +1808,8 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         "grok": grok,
         "grok_seats": grok_seats,
         "antigravity": agy,
+        "tokentracker": tokentracker,
+        "rag": rag,
         "ledger": ledger,
     }
 

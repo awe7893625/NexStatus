@@ -9,7 +9,8 @@
 🌐 **Landing page:** https://awe7893625.github.io/NexStatus/  
 📦 **Source:** https://github.com/awe7893625/NexStatus
 
-See Claude, Codex, OpenCode Go, Grok, and memory/CPU at a glance — then click for an Apple-style glass panel with **bar or circle** progress, **switchable themes**, **live glass lab** (opacity / blur / saturate), and creative **Pressure Radar** + **Quota Weather**.
+See Claude, Codex, OpenCode Go, Grok, TokenTracker, Private RAG, and memory/CPU at a glance — then click for an Apple-style glass panel with **bar or circle** progress, **switchable themes**, **live glass lab** (opacity / blur / saturate), and creative **Pressure Radar** + **Quota Weather**.
+TokenTracker (local metadata-only JSONL) displays today/7d/30d tokens and source breakdown, while Private RAG tracks loopback health and document counts.
 
 ```text
 C70% G49% K10% M8%
@@ -74,6 +75,8 @@ AI coding tools each hide usage in a different place. NexStatus unifies them:
 | **Codex** | 5h / 7d % | `rate_limits` in `~/.codex/sessions/**/*.jsonl` |
 | **OpenCode Go** | plan limit status | light probe to `zen/go` + optional local ledger |
 | **Grok (xAI)** | monthly credits % | `cli-chat-proxy` billing API via `~/.grok/auth.json` |
+| **TokenTracker** | today/7d/30d tokens & sources | local metadata-only JSONL queue |
+| **Private RAG** | loopback health & doc status | HTTP status check on local loopback server |
 | **Mac** | CPU / MEM / Swap | `top`, `memory_pressure`, `sysctl` |
 
 No API keys are written into the status snapshot.
@@ -85,7 +88,7 @@ No API keys are written into the status snapshot.
 - macOS (tested on Apple Silicon; works with MenuBar extras)
 - [Hammerspoon](https://www.hammerspoon.org/)
 - Python 3.10+ (system `/usr/bin/python3` is enough)
-- Optional accounts/tools you already use: Claude Code, Codex, OpenCode Go, Grok CLI
+- Optional accounts/tools you already use: Claude Code, Codex, OpenCode Go, Grok CLI, TokenTracker, Private RAG
 
 ---
 
@@ -133,6 +136,8 @@ hs -c 'if _G.NexStatus then _G.NexStatus.stop() end; hs.reload()'
 | `NEXSTATUS_CACHE` | `~/.cache/nexstatus` | Snapshot + remote caches |
 | `NEXSTATUS_COST_DB` | `~/.claude/state/cost.db` | Optional OpenCode Go ledger (if you keep one) |
 | `OPENCODE_ZEN_API_KEY` | from `~/.local/share/opencode/auth.json` | OpenCode Go probe |
+| `NEXSTATUS_TOKENTRACKER_QUEUE` | `~/.tokentracker/tracker/queue.jsonl` | TokenTracker local metadata-only JSONL queue path |
+| `NEXSTATUS_RAG_BASE_URL` | `http://127.0.0.1:8220` | Private RAG local loopback base URL |
 
 ---
 
@@ -172,6 +177,8 @@ NexStatus/
 - Collector never writes API keys into `~/.cache/nexstatus/status.json`
 - Grok / OpenCode tokens are read from existing local auth files or env vars
 - Host metrics stay on-device
+- TokenTracker reads only local metadata-only JSONL queue without prompt/response/session content
+- Private RAG requests strictly target loopback (`127.0.0.1`/`localhost`), without following HTTP redirects
 - Remote probes are cached (Grok ~5m, OpenCode Go ~5–15m) to avoid hammering APIs
 - OpenCode workspace URLs in error messages are redacted before cache/display
 - Full notes: [docs/SECURITY.md](docs/SECURITY.md)
