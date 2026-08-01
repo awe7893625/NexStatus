@@ -7,6 +7,8 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +32,62 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(result["weekly_used_pct"], 42)
         self.assertEqual(result["weekly_reset_at"], "2026-07-18T04:00:00Z")
         self.assertEqual(result["weekly_breakdown"], {"chat": 20, "build": 22})
+
+    def test_grok_chat_gate_detects_spending_limit_block(self) -> None:
+        """Enforcement 403 spending-limit must surface as chat_gate=blocked."""
+        body = json.dumps({
+            "code": "personal-team-blocked:spending-limit",
+            "error": "You have run out of credits or need a Grok subscription.",
+        }).encode()
+
+        err = urllib.error.HTTPError(
+            url=collector.GROK_MODELS_URL,
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+        err.read = lambda: body  # type: ignore[method-assign]
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=err):
+            gate = collector._grok_chat_gate("tok-test")
+        self.assertEqual(gate["chat_gate"], "blocked")
+        self.assertIs(gate["chat_ok"], False)
+        self.assertIn("spending-limit", gate["block_code"] or "")
+
+    def test_annotate_flags_false_available_when_billing_has_room(self) -> None:
+        """Billing 0/15000 + chat blocked → 帳務鎖 / false_available."""
+        result = {
+            "ok": True,
+            "used": 0.0,
+            "monthly_limit": 15000.0,
+            "used_pct": 0,
+        }
+        with mock.patch.object(
+            collector,
+            "_grok_chat_gate",
+            return_value={
+                "chat_ok": False,
+                "chat_gate": "blocked",
+                "block_code": "personal-team-blocked:spending-limit",
+                "block_message": "run out of credits",
+                "http_status": 403,
+            },
+        ):
+            out = collector._annotate_grok_enforcement(result, token="tok")
+        self.assertIs(out["false_available"], True)
+        self.assertIs(out["effective_available"], False)
+        self.assertEqual(out["status_label"], "帳務鎖")
+        self.assertEqual(out["chat_gate"], "blocked")
+
+    def test_annotate_billing_exhausted_skips_network_probe(self) -> None:
+        result = {"ok": True, "used": 16120.0, "monthly_limit": 15000.0, "used_pct": 100}
+        with mock.patch.object(collector, "_grok_chat_gate") as probe:
+            out = collector._annotate_grok_enforcement(result, token="tok")
+        probe.assert_not_called()
+        self.assertEqual(out["status_label"], "額度盡")
+        self.assertEqual(out["chat_gate"], "billing_exhausted")
+        self.assertIs(out["false_available"], False)
 
     def test_grok_weekly_estimate_uses_seat_history_not_shared_default(self) -> None:
         """Regression: multi-seat weekly bars must not share G1's baseline.

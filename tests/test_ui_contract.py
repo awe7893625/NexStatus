@@ -85,6 +85,14 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn("（台北）", self.source)
         self.assertIn("重置時間", self.source)
 
+    def test_grok_seat_surfaces_false_available_lock(self) -> None:
+        """Billing-vs-chat mismatch must render as 帳務鎖 / 假有額, not 0% green."""
+        self.assertIn("false_available", self.source)
+        self.assertIn("chat_gate", self.source)
+        self.assertIn("帳務鎖", self.source)
+        self.assertIn("假有額", self.source)
+        self.assertIn("buildGrokSeatData", self.source)
+
     def test_mac_card_opens_host_resource_sheet_with_process_lists(self) -> None:
         self.assertIn("macHostSheetHTML", self.source)
         self.assertIn('id="usage-mac-sheet"', self.source)

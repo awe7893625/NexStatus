@@ -47,8 +47,13 @@ GROK_SEATS_ROOT = Path(os.path.expanduser(os.environ.get("GROK_SEATS_ROOT", "~/.
 GROK_SEAT_CACHES = tuple(CACHE_DIR / f"grok-billing-seat-{n}.json" for n in (1, 2, 3))
 GROK_SEAT_HISTORIES = tuple(CACHE_DIR / f"grok-billing-history-seat-{n}.jsonl" for n in (1, 2, 3))
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
+# Lightweight enforcement probe (GET, no completion burn). Billing can show
+# remaining SuperGrok credits while this path still returns spending-limit
+# (g2 / movielin8866 2026-08-01: used=0/15000 but personal-team-blocked).
+GROK_MODELS_URL = "https://api.x.ai/v1/models"
 GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 GROK_TTL = 5 * 60  # seconds — billing is monthly, no need to hammer API
+GROK_CHAT_GATE_TIMEOUT = 8.0
 # x.ai's /v1/billing endpoint returns credits only, never a USD figure — the
 # subscription price has to be hand-maintained here (Rain-confirmed 2026-07-12).
 # Bump this when the plan tier or price changes; nothing else will catch it.
@@ -601,11 +606,15 @@ def _grok_weekly_usage(
 
 
 def grok_usage(force: bool = False) -> dict[str, Any]:
-    # Prefer short-lived cache so MenuBar refresh doesn't hit network every 2s
+    # Prefer short-lived cache so MenuBar refresh doesn't hit network every 2s.
+    # Require chat_gate so pre-probe caches are refreshed once.
     if not force and GROK_CACHE.exists():
         try:
             cached = json.loads(GROK_CACHE.read_text(encoding="utf-8"))
-            if _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL:
+            if (
+                _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL
+                and "chat_gate" in cached
+            ):
                 return cached
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
@@ -614,11 +623,7 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
     if not auth:
         return {"ok": False, "error": "no ~/.grok/auth.json — run grok login"}
 
-    token = None
-    for entry in auth.values():
-        if isinstance(entry, dict) and entry.get("key"):
-            token = entry["key"]
-            break
+    token = _auth_bearer_token(auth)
     if not token:
         return {"ok": False, "error": "no access token in auth.json"}
 
@@ -671,6 +676,7 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         "_fetched_at_ts": _now(),
         **weekly_fields,
     }
+    _annotate_grok_enforcement(result, token)
     _append_grok_billing_history(used, limit)
     try:
         _write_cache_json(GROK_CACHE, result)
@@ -690,6 +696,169 @@ def _seat_email(auth_path: Path) -> str:
     return "(no email)"
 
 
+def _auth_bearer_token(auth: dict[str, Any] | None) -> str | None:
+    if not auth:
+        return None
+    for entry in auth.values():
+        if isinstance(entry, dict):
+            key = entry.get("key")
+            if isinstance(key, str) and key:
+                return key
+    return None
+
+
+def _grok_chat_gate(token: str) -> dict[str, Any]:
+    """Probe whether the chat enforcement path allows this session.
+
+    SuperGrok ``/v1/billing`` only reports monthly included credits. The chat
+    path (``api.x.ai``) can still return ``personal-team-blocked:spending-limit``
+    after a hard overage month, even when billing ``used`` has reset to 0.
+    Use GET ``/v1/models`` so we do not burn completion credits.
+    """
+    req = urllib.request.Request(
+        GROK_MODELS_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "nexstatus/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(
+            req,
+            context=ssl.create_default_context(),
+            timeout=GROK_CHAT_GATE_TIMEOUT,
+        ) as resp:
+            # Drain body so the connection can close cleanly; ignore content.
+            try:
+                resp.read(4096)
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "chat_ok": True,
+                "chat_gate": "ok",
+                "block_code": None,
+                "block_message": None,
+                "http_status": getattr(resp, "status", 200),
+            }
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:800]
+        except Exception:  # noqa: BLE001
+            body = ""
+        code: str | None = None
+        msg: str | None = None
+        try:
+            parsed = json.loads(body) if body else {}
+            if isinstance(parsed, dict):
+                raw_code = parsed.get("code") or parsed.get("error_code")
+                code = str(raw_code) if raw_code is not None else None
+                err = parsed.get("error")
+                if isinstance(err, str):
+                    msg = err
+                elif isinstance(err, dict):
+                    msg = err.get("message") or err.get("error")
+                    if msg is not None:
+                        msg = str(msg)
+                if not msg and parsed.get("message") is not None:
+                    msg = str(parsed.get("message"))
+        except json.JSONDecodeError:
+            msg = body[:200] if body else None
+
+        msg_l = (msg or "").lower()
+        code_l = (code or "").lower()
+        blocked = (
+            e.code in (402, 403)
+            or "spending-limit" in code_l
+            or "blocked" in code_l
+            or "usage balance exhausted" in msg_l
+            or "run out of credits" in msg_l
+            or "payment required" in msg_l
+        )
+        if blocked:
+            return {
+                "chat_ok": False,
+                "chat_gate": "blocked",
+                "block_code": code or f"http_{e.code}",
+                "block_message": (msg or "chat path blocked")[:240],
+                "http_status": e.code,
+            }
+        return {
+            "chat_ok": None,
+            "chat_gate": "unknown",
+            "block_code": code or f"http_{e.code}",
+            "block_message": (msg or f"HTTP {e.code}")[:240],
+            "http_status": e.code,
+        }
+    except Exception as e:  # noqa: BLE001 — probe must never abort snapshot
+        return {
+            "chat_ok": None,
+            "chat_gate": "unknown",
+            "block_code": None,
+            "block_message": _safe_error(e),
+            "http_status": None,
+        }
+
+
+def _annotate_grok_enforcement(
+    result: dict[str, Any],
+    token: str | None,
+) -> dict[str, Any]:
+    """Attach chat-gate fields; flag billing-vs-enforcement mismatch (假有額)."""
+    used = result.get("used")
+    limit = result.get("monthly_limit")
+    billing_remaining = True
+    billing_exhausted = False
+    if isinstance(used, (int, float)) and isinstance(limit, (int, float)) and limit > 0:
+        billing_exhausted = float(used) >= float(limit)
+        billing_remaining = float(used) < float(limit)
+
+    if billing_exhausted:
+        result["chat_ok"] = False
+        result["chat_gate"] = "billing_exhausted"
+        result["block_code"] = "monthly_limit"
+        result["block_message"] = "月 credits 已用盡"
+        result["http_status"] = None
+        result["effective_available"] = False
+        result["false_available"] = False
+        result["status_label"] = "額度盡"
+        return result
+
+    if not token:
+        result["chat_ok"] = None
+        result["chat_gate"] = "unknown"
+        result["block_code"] = None
+        result["block_message"] = "no access token"
+        result["http_status"] = None
+        result["effective_available"] = None
+        result["false_available"] = False
+        result["status_label"] = "未確認"
+        return result
+
+    gate = _grok_chat_gate(token)
+    result["chat_ok"] = gate.get("chat_ok")
+    result["chat_gate"] = gate.get("chat_gate")
+    result["block_code"] = gate.get("block_code")
+    result["block_message"] = gate.get("block_message")
+    result["http_status"] = gate.get("http_status")
+
+    if gate.get("chat_gate") == "blocked":
+        # Billing says room left, enforcement says no → 假有額 / 帳務鎖
+        result["effective_available"] = False
+        result["false_available"] = bool(billing_remaining)
+        result["status_label"] = "帳務鎖" if billing_remaining else "額度盡"
+    elif gate.get("chat_ok") is True:
+        result["effective_available"] = True
+        result["false_available"] = False
+        result["status_label"] = "正常"
+    else:
+        result["effective_available"] = None
+        result["false_available"] = False
+        result["status_label"] = "未確認"
+    return result
+
+
 def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     """Fetch billing for one grok-seat, with per-seat cache and history."""
     seat_dir = GROK_SEATS_ROOT / str(seat_num)
@@ -705,7 +874,11 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     if not force and cache_path.is_file():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL:
+            # Require chat_gate so pre-probe caches are not treated as "正常".
+            if (
+                _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL
+                and "chat_gate" in cached
+            ):
                 cached["seat"] = seat_num
                 cached["email"] = email
                 cached["active"] = True
@@ -717,11 +890,7 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     if not auth:
         return {"ok": False, "seat": seat_num, "email": email, "error": "invalid auth.json", "active": True}
     
-    token = None
-    for entry in auth.values():
-        if isinstance(entry, dict) and entry.get("key"):
-            token = entry["key"]
-            break
+    token = _auth_bearer_token(auth)
     if not token:
         return {"ok": False, "seat": seat_num, "email": email, "error": "no access token", "active": True}
     
@@ -779,6 +948,7 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
         "_fetched_at_ts": _now(),
         **weekly_fields,
     }
+    _annotate_grok_enforcement(result, token)
     
     _append_grok_billing_history_to(used, limit, history_path)
     try:

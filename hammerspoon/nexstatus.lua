@@ -1956,20 +1956,45 @@ buildHTML = function(s)
   local gkSeatSheetRows = {}
 
   -- Helper: build display data for one grok seat
+  -- chat_gate / false_available come from collector enforcement probe
+  -- (billing can show remaining credits while chat is spending-limit blocked).
   local function buildGrokSeatData(seat)
     local wPct = seat.weekly_used_pct
     local wAvail = seat.weekly_available == true or wPct ~= nil
-    local main = seat.ok and (
-        wAvail and (pctText(wPct) .. " · 週 · 月 " .. pctText(seat.used_pct))
-        or (pctText(seat.used_pct) .. " · 月 credits")
-      ) or "離線"
     local used = seat.used and string.format("%.0f", seat.used) or "—"
     local lim = seat.monthly_limit and string.format("%.0f", seat.monthly_limit) or "—"
     local wUsed = seat.weekly_used and string.format("%.0f", seat.weekly_used) or "—"
     local wLim = seat.weekly_limit and string.format("%.0f", seat.weekly_limit) or "—"
+    local falseAvail = seat.false_available == true
+      or (seat.chat_gate == "blocked" and seat.effective_available == false
+          and seat.status_label == "帳務鎖")
+    local billingExhausted = seat.chat_gate == "billing_exhausted"
+      or seat.status_label == "額度盡"
+    local main
+    if not seat.ok then
+      main = "離線"
+    elseif falseAvail then
+      main = "帳務鎖 · 假有額 · 月 " .. pctText(seat.used_pct)
+    elseif billingExhausted then
+      main = "額度盡 · 月 " .. pctText(seat.used_pct)
+    elseif wAvail then
+      main = pctText(wPct) .. " · 週 · 月 " .. pctText(seat.used_pct)
+    else
+      main = pctText(seat.used_pct) .. " · 月 credits"
+    end
     local sub
     if not seat.ok then
       sub = seat.error or "請先 grok login"
+    elseif falseAvail then
+      local reason = seat.block_code or "spending-limit"
+      local msg = seat.block_message or "billing 有額但 chat 被擋"
+      -- keep sub one line; prefer code + monthly numbers
+      sub = string.format(
+        "⚠ %s · 月 %s/%s 仍顯示有額 · %s",
+        tostring(reason), used, lim, tostring(msg):sub(1, 80)
+      )
+    elseif billingExhausted then
+      sub = string.format("月 credits %s / %s 已用盡", used, lim)
     elseif wAvail then
       local srcNote = ""
       if seat.weekly_source == "billing_snapshot_delta" then
@@ -1991,11 +2016,25 @@ buildHTML = function(s)
         tostring(seat.period_end or ""):sub(1, 10))
     end
     local bars = {}
-    if seat.ok and wAvail then
+    if seat.ok and wAvail and not falseAvail then
       table.insert(bars, { label = "本週 credits（估）", pct = wPct })
     end
     if seat.ok then table.insert(bars, { label = "月 credits", pct = seat.used_pct }) end
-    return { main = main, sub = sub, bars = bars }
+    local badge
+    if not seat.ok then
+      badge = "離線"
+    elseif falseAvail then
+      badge = "帳務鎖"
+    elseif billingExhausted then
+      badge = "額度盡"
+    else
+      badge = seat.price or "SuperGrok"
+    end
+    local accent = nil
+    if falseAvail or billingExhausted then
+      accent = "#FF453A" -- system red: cannot use this seat for chat
+    end
+    return { main = main, sub = sub, bars = bars, badge = badge, accent = accent, falseAvail = falseAvail }
   end
 
   -- Build per-seat cards and sheet rows
@@ -2004,17 +2043,26 @@ buildHTML = function(s)
       local n = seat.seat or 0
       local emailShort = tostring(seat.email or "?"):match("^([^@]+)") or "?"
       local disp = buildGrokSeatData(seat)
+      local accent = disp.accent
+        or (n == 1 and "#BF5AF2" or (n == 2 and "#A855F7" or "#9333EA"))
       table.insert(gkSeatCards, rowHTML({
         id = "grok-g" .. n,
         name = "G" .. n .. " " .. esc(emailShort),
-        badge = seat.ok and (seat.price or "SuperGrok") or "離線",
-        accent = n == 1 and "#BF5AF2" or (n == 2 and "#A855F7" or "#9333EA"),
+        badge = disp.badge,
+        accent = accent,
         main = disp.main,
         sub = disp.sub,
         bars = disp.bars,
       }))
       -- Sheet detail rows for this seat
       if seat.ok then
+        if seat.false_available == true or seat.status_label == "帳務鎖" then
+          table.insert(gkSeatSheetRows, {
+            label = "G" .. n .. " 狀態",
+            usage = "帳務鎖 · 假有額（" .. tostring(seat.block_code or "spending-limit") .. "）",
+            reset = "—",
+          })
+        end
         table.insert(gkSeatSheetRows, {
           label = "G" .. n .. " 本週",
           usage = (seat.weekly_used and seat.weekly_limit)
