@@ -34,6 +34,7 @@ build/
 # Internal orchestration / private work packets (never publish)
 .workflow/
 .worktrees/
+OPENROUTER_SPEC.md
 # Runtime cache / snapshots (owner machine only)
 **/status.json
 **/panel-debug.html

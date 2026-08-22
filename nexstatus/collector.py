@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NexStatus collector — Claude / Codex / OpenCode Go / Grok / host metrics.
+"""NexStatus collector — Claude / Codex / OpenCode Go / Grok / OpenRouter / host metrics.
 
 Writes a JSON snapshot for the Hammerspoon MenuBar UI.
 No secrets are written to disk (tokens are only used in-memory for API calls).
@@ -34,6 +34,8 @@ CACHE_DIR = Path(os.environ.get("NEXSTATUS_CACHE", os.path.expanduser("~/.cache/
 OUT = CACHE_DIR / "status.json"
 GROK_CACHE = CACHE_DIR / "grok-billing.json"
 GROK_HISTORY = CACHE_DIR / "grok-billing-history.jsonl"
+OPENROUTER_CACHE = CACHE_DIR / "openrouter.json"
+OPENROUTER_HISTORY = CACHE_DIR / "openrouter-history.jsonl"
 GO_CACHE = CACHE_DIR / "opencode-go.json"
 CLAUDE_CACHE = CACHE_DIR / "claude-usage.json"
 CLAUDE_STATUS = Path(os.path.expanduser("~/.claude/usage-status.json"))
@@ -51,9 +53,25 @@ GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 # remaining SuperGrok credits while this path still returns spending-limit
 # (g2 / movielin8866 2026-08-01: used=0/15000 but personal-team-blocked).
 GROK_MODELS_URL = "https://api.x.ai/v1/models"
+OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 GROK_TTL = 5 * 60  # seconds — billing is monthly, no need to hammer API
 GROK_CHAT_GATE_TIMEOUT = 8.0
+OPENROUTER_TTL = 5 * 60  # seconds — account billing data does not need rapid polling
+OPENROUTER_TIMEOUT = 8.0
+# The Hammerspoon collector watchdog is 8s for the whole process. Keep this
+# optional provider well inside that window, including both seats and both
+# endpoints per seat, so one slow billing call cannot starve later providers.
+OPENROUTER_TOTAL_DEADLINE = 3.5
+OPENROUTER_SEAT_DEADLINE = 1.5
+# The Hammerspoon collector watchdog kills the whole process at 8s. Establish
+# one shared deadline at build_snapshot() start so OpenRouter (which runs
+# after host/claude/codex/grok/grok_seats) can never grant itself a fresh
+# relative budget that ignores how much of the 8s earlier providers already
+# spent. 0.5s margin covers OpenRouter's own post-fetch JSON/trend/cache work.
+COLLECTOR_WATCHDOG_BUDGET_SECONDS = 7.5
+OPENROUTER_MIN_REQUEST_BUDGET = 0.1
 # x.ai's /v1/billing endpoint returns credits only, never a USD figure — the
 # subscription price has to be hand-maintained here (Rain-confirmed 2026-07-12).
 # Bump this when the plan tier or price changes; nothing else will catch it.
@@ -98,7 +116,16 @@ AGY_PATH_MARKERS = (
     "/bin/agy",
     "agy-node",
 )
-KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE, *GROK_SEAT_CACHES, *AGY_SEAT_CACHES)
+OPENROUTER_DSH_ENV = Path(os.path.expanduser("~/.dsh/.env"))
+OPENROUTER_GLOBAL_ENV = Path(os.path.expanduser("~/.hermes/credentials.d/openrouter"))
+OPENROUTER_SEATS = (
+    {"seat": "dsh", "path": OPENROUTER_DSH_ENV, "variable": "DEEPSEEK_API_KEY"},
+    {"seat": "global", "path": OPENROUTER_GLOBAL_ENV, "variable": "OPENROUTER_API_KEY"},
+)
+KNOWN_CACHE_FILES = (
+    OUT, GROK_CACHE, OPENROUTER_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE,
+    *GROK_SEAT_CACHES, *AGY_SEAT_CACHES,
+)
 
 
 def _now() -> float:
@@ -129,6 +156,11 @@ def _ensure_cache_dir() -> None:
                 os.chmod(path, 0o600)
         except OSError:
             continue
+    try:
+        if OPENROUTER_HISTORY.parent == CACHE_DIR and OPENROUTER_HISTORY.is_file():
+            os.chmod(OPENROUTER_HISTORY, 0o600)
+    except OSError:
+        pass
 
 
 def _json_safe(value: Any) -> Any:
@@ -1124,6 +1156,386 @@ def _money_val(v: Any) -> float | None:
     if isinstance(v, (int, float)):
         return float(v)
     return None
+
+
+def _read_env_key(path: Path, variable: str) -> str | None:
+    """Read one dotenv-style credential without ever returning it to output."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        prefix = f"{variable}="
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip().strip("'\"")
+            return value or None
+    # Some credential.d files contain only the key. Support that shape while
+    # refusing to treat an unrelated multi-line document as a credential.
+    if len(lines) == 1 and "=" not in lines[0] and lines[0].strip():
+        return lines[0].strip().strip("'\"") or None
+    return None
+
+
+def _openrouter_key(seat: dict[str, Any]) -> str | None:
+    """Resolve one OpenRouter key from its explicitly assigned local source."""
+    variable = str(seat.get("variable") or "")
+    path = seat.get("path")
+    if not variable or not isinstance(path, Path):
+        return None
+
+    # The assigned file is the normal authority. An environment value is an
+    # explicit override only when it has the shape of an OpenRouter key;
+    # malformed launch-environment residue must never silently win.
+    file_value = _read_env_key(path, variable)
+    env_value = os.environ.get(variable)
+    if _valid_openrouter_key(env_value):
+        return env_value
+    if _valid_openrouter_key(file_value):
+        return file_value
+    return None
+
+
+def _valid_openrouter_key(value: Any) -> bool:
+    if not isinstance(value, str) or not (20 <= len(value) <= 512):
+        return False
+    if not value.startswith("sk-or-") or not value.isascii():
+        return False
+    return not any(char.isspace() for char in value)
+
+
+def _openrouter_key_source(seat: dict[str, Any], key: str | None) -> str | None:
+    """Identify the redacted key source without exposing credential material."""
+    if not _valid_openrouter_key(key):
+        return None
+    variable = str(seat.get("variable") or "")
+    path = seat.get("path")
+    if not variable or not isinstance(path, Path):
+        return None
+    if _valid_openrouter_key(os.environ.get(variable)) and os.environ.get(variable) == key:
+        return "env"
+    if _valid_openrouter_key(_read_env_key(path, variable)):
+        return "file"
+    return None
+
+
+def _openrouter_empty_seat(
+    seat_name: str,
+    error: str,
+    key_source: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "seat": seat_name,
+        "key_source": key_source,
+        "label": None,
+        "account_credits": None,
+        "account_usage": None,
+        "account_remaining": None,
+        "key_limit": None,
+        "key_limit_remaining": None,
+        "key_usage_monthly": None,
+        "used_pct": None,
+        "delta_today": None,
+        "delta_7d": None,
+        "daily_avg": None,
+        "_fetched_at": None,
+        "_fetched_at_ts": None,
+        "error": error,
+    }
+
+
+def _openrouter_fetch_json(
+    url: str,
+    key: str,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": "nexstatus/1.0",
+        },
+    )
+    try:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("openrouter_deadline")
+        timeout = OPENROUTER_TIMEOUT if deadline is None else _remaining(deadline, OPENROUTER_TIMEOUT)
+        with urllib.request.urlopen(
+            req,
+            context=ssl.create_default_context(),
+            timeout=timeout,
+        ) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except Exception as exc:  # noqa: BLE001 — provider boundary is isolated below
+        raise RuntimeError(_safe_error(exc)) from exc
+    if not isinstance(body, dict):
+        raise RuntimeError("invalid_response")
+    return body
+
+
+def _openrouter_history_rows(path: Path | None = None) -> list[dict[str, Any]]:
+    actual_path = path if path is not None else OPENROUTER_HISTORY
+    try:
+        lines = actual_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _openrouter_usage_trends(
+    seat: str,
+    current_usage: float | None,
+    history_path: Path | None = None,
+    now_ts: float | None = None,
+) -> dict[str, float | None]:
+    """Calculate measured deltas only when history contains a real baseline.
+
+    Today's baseline is the first prior sample in the current UTC day. The
+    seven-day baseline must be at or before the seven-day cutoff; otherwise we
+    deliberately return unknown instead of inventing a rate from current use.
+    """
+    empty: dict[str, float | None] = {
+        "delta_today": None,
+        "delta_7d": None,
+        "daily_avg": None,
+    }
+    if current_usage is None:
+        return empty
+    now = float(_now() if now_ts is None else now_ts)
+    rows: list[tuple[float, float]] = []
+    for row in _openrouter_history_rows(history_path):
+        if row.get("seat") != seat:
+            continue
+        try:
+            ts = float(row.get("ts_unix"))
+            usage = float(row.get("total_usage"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(ts) and math.isfinite(usage) and ts < now:
+            rows.append((ts, usage))
+    rows.sort(key=lambda item: item[0])
+
+    today_start = datetime.fromtimestamp(now, timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    today_rows = [item for item in rows if item[0] >= today_start]
+    if today_rows:
+        delta_today = float(current_usage) - today_rows[0][1]
+        if delta_today >= 0:
+            empty["delta_today"] = round(delta_today, 6)
+
+    # A 7-day trend needs a measured sample near the 7-day boundary. A much
+    # older sample is not a 7-day baseline and must remain unknown.
+    window_start = now - 8 * 86400
+    window_end = now - 6 * 86400
+    baselines = [item for item in rows if window_start <= item[0] <= window_end]
+    if baselines:
+        delta = float(current_usage) - baselines[-1][1]
+        if delta >= 0:
+            empty["delta_7d"] = round(delta, 6)
+            empty["daily_avg"] = round(delta / 7.0, 8)
+    return empty
+
+
+def _append_openrouter_history(
+    seat: str,
+    total_usage: float | None,
+    usage_monthly: float | None,
+    total_credits: float | None,
+    ts: float | None = None,
+    path: Path | None = None,
+) -> None:
+    """Append a redacted billing point and bound both record count and size."""
+    if total_usage is None or total_credits is None:
+        return
+    actual_path = path if path is not None else OPENROUTER_HISTORY
+    try:
+        _ensure_cache_dir()
+        timestamp = float(_now() if ts is None else ts)
+        row = {
+            "ts": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+            "ts_unix": timestamp,
+            "seat": seat,
+            "total_usage": float(total_usage),
+            "usage_monthly": float(usage_monthly) if usage_monthly is not None else None,
+            "total_credits": float(total_credits),
+        }
+        with actual_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.chmod(actual_path, 0o600)
+        lines = actual_path.read_text(encoding="utf-8").splitlines()
+        # 5-minute polling for two seats needs >4,000 rows for a 7-day
+        # baseline. Keep a little headroom while still bounding local state.
+        if len(lines) > 6000 or actual_path.stat().st_size > 1024 * 1024:
+            kept: list[str] = []
+            size = 0
+            for line in reversed(lines):
+                encoded_size = len((line + "\n").encode("utf-8"))
+                if len(kept) >= 5000 or size + encoded_size > 900 * 1024:
+                    break
+                kept.append(line)
+                size += encoded_size
+            actual_path.write_text("\n".join(reversed(kept)) + "\n", encoding="utf-8")
+            os.chmod(actual_path, 0o600)
+    except OSError:
+        pass
+
+
+def openrouter_usage(
+    force: bool = False,
+    deadline: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Collect account and key billing for the configured OpenRouter seats."""
+    if not force and OPENROUTER_CACHE.exists():
+        cached = _read_json(OPENROUTER_CACHE)
+        cache_fresh = True
+        if not cached:
+            cache_fresh = False
+        else:
+            for seat in OPENROUTER_SEATS:
+                entry = cached.get(str(seat["seat"]))
+                try:
+                    fetched_ts = float(entry.get("_fetched_at_ts")) if isinstance(entry, dict) else 0.0
+                except (TypeError, ValueError):
+                    fetched_ts = 0.0
+                if not isinstance(entry, dict) or _now() - fetched_ts >= OPENROUTER_TTL:
+                    cache_fresh = False
+                    break
+        if cache_fresh:
+            return cached  # type: ignore[return-value]
+
+    result: dict[str, dict[str, Any]] = {}
+    fetched_at_ts = _now()
+    fetched_at = datetime.fromtimestamp(fetched_at_ts, timezone.utc).isoformat()
+    total_deadline = time.monotonic() + OPENROUTER_TOTAL_DEADLINE
+    if deadline is not None:
+        total_deadline = min(total_deadline, deadline)
+    for seat_cfg in OPENROUTER_SEATS:
+        seat_name = str(seat_cfg.get("seat") or "unknown")
+        now = time.monotonic()
+        seat_deadline = min(total_deadline, now + OPENROUTER_SEAT_DEADLINE)
+        key = _openrouter_key(seat_cfg)
+        key_source = _openrouter_key_source(seat_cfg, key) or "unknown"
+        if not key:
+            result[seat_name] = _openrouter_empty_seat(seat_name, "missing_api_key", key_source=None)
+            continue
+        if seat_deadline - now <= OPENROUTER_MIN_REQUEST_BUDGET:
+            result[seat_name] = _openrouter_empty_seat(
+                seat_name,
+                "deadline_exceeded",
+                key_source=key_source,
+            )
+            continue
+        try:
+            try:
+                credits_body = _openrouter_fetch_json(
+                    OPENROUTER_CREDITS_URL,
+                    key,
+                    deadline=seat_deadline,
+                )
+                key_body = _openrouter_fetch_json(
+                    OPENROUTER_KEY_URL,
+                    key,
+                    deadline=seat_deadline,
+                )
+            except RuntimeError as first_exc:
+                fallback_key = None
+                if str(first_exc) in {"HTTP 401", "HTTP 403"} and key_source == "env":
+                    variable = str(seat_cfg.get("variable") or "")
+                    path = seat_cfg.get("path")
+                    if variable and isinstance(path, Path):
+                        file_key = _read_env_key(path, variable)
+                        if _valid_openrouter_key(file_key) and file_key != key:
+                            fallback_key = file_key
+                if fallback_key is None:
+                    raise
+                try:
+                    credits_body = _openrouter_fetch_json(
+                        OPENROUTER_CREDITS_URL,
+                        fallback_key,
+                        deadline=seat_deadline,
+                    )
+                    key_body = _openrouter_fetch_json(
+                        OPENROUTER_KEY_URL,
+                        fallback_key,
+                        deadline=seat_deadline,
+                    )
+                except Exception:
+                    raise first_exc
+                key_source = "fallback"
+            credits = credits_body.get("data")
+            key_data = key_body.get("data")
+            if not isinstance(credits, dict) or not isinstance(key_data, dict):
+                raise RuntimeError("invalid_response")
+
+            total_credits = _money_val(credits.get("total_credits"))
+            total_usage = _money_val(credits.get("total_usage"))
+            account_remaining = None
+            if total_credits is not None and total_usage is not None:
+                account_remaining = max(0.0, total_credits - total_usage)
+            key_limit = _money_val(key_data.get("limit"))
+            key_limit_remaining = _money_val(key_data.get("limit_remaining"))
+            key_usage_monthly = _money_val(key_data.get("usage_monthly"))
+            used_pct = None
+            if total_credits is not None and total_credits > 0 and total_usage is not None:
+                used_pct = _pct(100.0 * total_usage / total_credits)
+            trends = _openrouter_usage_trends(
+                seat_name,
+                total_usage,
+                now_ts=fetched_at_ts,
+            )
+            entry = {
+                "ok": True,
+                "seat": seat_name,
+                "key_source": key_source,
+                "label": key_data.get("label") if isinstance(key_data.get("label"), str) else None,
+                "account_credits": total_credits,
+                "account_usage": total_usage,
+                "account_remaining": account_remaining,
+                "key_limit": key_limit,
+                "key_limit_remaining": key_limit_remaining,
+                "key_usage_monthly": key_usage_monthly,
+                "used_pct": used_pct,
+                **trends,
+                "_fetched_at": fetched_at,
+                "_fetched_at_ts": fetched_at_ts,
+            }
+            result[seat_name] = entry
+            _append_openrouter_history(
+                seat_name,
+                total_usage,
+                key_usage_monthly,
+                total_credits,
+                ts=fetched_at_ts,
+            )
+        except RuntimeError as exc:
+            result[seat_name] = _openrouter_empty_seat(seat_name, str(exc), key_source=key_source)
+        except Exception as exc:  # noqa: BLE001 — one seat must not abort the other
+            result[seat_name] = _openrouter_empty_seat(seat_name, _safe_error(exc), key_source=key_source)
+
+    try:
+        _write_cache_json(OPENROUTER_CACHE, result)
+    except OSError:
+        pass
+    return result
 
 
 def _opencode_key() -> str | None:
@@ -2287,6 +2699,7 @@ def _menu_quota_pct(provider: dict[str, Any] | None) -> Any:
 
 
 def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
+    collector_deadline = time.monotonic() + COLLECTOR_WATCHDOG_BUDGET_SECONDS
     host = _safe_collect("host", host_metrics)
     claude = _safe_collect("claude", claude_usage)
     codex = _safe_collect("codex", codex_usage)
@@ -2295,6 +2708,12 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         grok_seats = grok_multi_seat_usage(force=force_remote)
     except Exception:  # noqa: BLE001
         grok_seats = []
+    openrouter = _safe_collect(
+        "openrouter",
+        openrouter_usage,
+        force=force_remote,
+        deadline=collector_deadline,
+    )
     go = _safe_collect("opencode_go", opencode_go_usage, force=force_remote)
     agy = _safe_collect("antigravity", antigravity_usage, force=force_remote)
     try:
@@ -2391,6 +2810,7 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         "opencode_go": go,
         "grok": grok,
         "grok_seats": grok_seats,
+        "openrouter": openrouter,
         "antigravity": agy,
         "agy_seats": agy_seats,
         "tokentracker": tokentracker,

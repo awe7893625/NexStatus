@@ -36,11 +36,27 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn("今日各平台 Token 長條圖", self.source)
         self.assertIn("todaySourceBarHTML", self.source)
         self.assertIn('{ id="grok", label="Grok", class="grok-line" }', self.source)
+        self.assertIn('{ id="openrouter", label="OpenRouter", class="openrouter-line" }', self.source)
+        self.assertIn('openrouter = { label = "OpenRouter", accent = "#0A84FF" }', self.source)
+        self.assertIn('"OpenRouter · " .. tostring(seatName)', self.source)
+        self.assertIn('for _, seatName in ipairs({ "dsh", "global" }) do', self.source)
+        self.assertIn('key 月 " .. keyUsage .. " / " .. keyLimit', self.source)
+        self.assertIn('帳號餘額低於 20%', self.source)
+        self.assertIn('accent = lowBalance and "#FF453A" or "#0A84FF"', self.source)
+        self.assertIn('deltaMoney(seat.delta_today)', self.source)
+        self.assertIn('deltaMoney(seat.delta_7d)', self.source)
         self.assertIn("top-one-line", self.source)
         self.assertIn("近 3 日", self.source)
         self.assertIn("近 7 日", self.source)
         self.assertIn("近 30 日", self.source)
         self.assertIn("本地算力", self.source)
+
+    def test_openrouter_render_reference_is_inside_build_html_scope(self) -> None:
+        build_block = self.source.split("buildHTML = function(s)", 1)[1].split(
+            "\nlocal function positionPanel", 1
+        )[0]
+        self.assertIn("local openrouter = s.openrouter or {}", build_block)
+        self.assertIn("buildOpenRouterSeat(seatName, openrouter[seatName])", build_block)
 
     def test_appearance_controls_are_progressively_disclosed(self) -> None:
         self.assertIn('<details class="appearance">', self.source)

@@ -189,6 +189,327 @@ class SnapshotContractTests(unittest.TestCase):
                 self.assertAlmostEqual(weekly2["weekly_used"], 3000.0)
                 _ = wrapped  # silence unused if wraps not invoked elsewhere
 
+    def test_openrouter_history_requires_real_baselines(self) -> None:
+        now = 1_787_500_800.0  # 2026-08-23 12:00 UTC
+        with tempfile.TemporaryDirectory() as tmp:
+            history = Path(tmp) / "openrouter-history.jsonl"
+            history.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {
+                            "seat": "dsh",
+                            "ts_unix": now - 4 * 3600,
+                            "total_usage": 1.0,
+                        },
+                        {
+                            "seat": "dsh",
+                            "ts_unix": now - 8 * 86400,
+                            "total_usage": 0.0,
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            measured = collector._openrouter_usage_trends(
+                "dsh", 2.0, history_path=history, now_ts=now
+            )
+            self.assertEqual(measured["delta_today"], 1.0)
+            self.assertEqual(measured["delta_7d"], 2.0)
+            self.assertAlmostEqual(float(measured["daily_avg"]), 2.0 / 7.0)
+
+            # Negative control: current usage alone is not a trend baseline.
+            empty = collector._openrouter_usage_trends(
+                "global", 246.0, history_path=history, now_ts=now
+            )
+            self.assertIsNone(empty["delta_today"])
+            self.assertIsNone(empty["delta_7d"])
+            self.assertIsNone(empty["daily_avg"])
+
+    def test_openrouter_30_day_baseline_is_not_a_7_day_trend(self) -> None:
+        now = 1_787_500_800.0
+        with tempfile.TemporaryDirectory() as tmp:
+            history = Path(tmp) / "openrouter-history.jsonl"
+            history.write_text(
+                json.dumps({
+                    "seat": "dsh",
+                    "ts_unix": now - 30 * 86400,
+                    "total_usage": 1.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            result = collector._openrouter_usage_trends(
+                "dsh", 2.0, history_path=history, now_ts=now
+            )
+            self.assertIsNone(result["delta_7d"])
+            self.assertIsNone(result["daily_avg"])
+
+    def test_openrouter_invalid_environment_key_falls_back_to_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            history = cache / "openrouter-history.jsonl"
+            key_file = root / "dsh.env"
+            file_key = "sk-or-v1-" + ("f" * 32)
+            key_file.write_text(f"DEEPSEEK_API_KEY={file_key}\n", encoding="utf-8")
+            seats = ({"seat": "dsh", "path": key_file, "variable": "DEEPSEEK_API_KEY"},)
+            with mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                OPENROUTER_CACHE=cache / "openrouter.json",
+                OPENROUTER_HISTORY=history,
+                OPENROUTER_SEATS=seats,
+                KNOWN_CACHE_FILES=(cache / "openrouter.json",),
+            ), mock.patch.dict(
+                os.environ,
+                {"DEEPSEEK_API_KEY": "old garbage key with spaces"},
+            ), mock.patch.object(
+                collector,
+                "_openrouter_fetch_json",
+                side_effect=[
+                    {"data": {"total_credits": 50, "total_usage": 1.0}},
+                    {"data": {"label": "sk-or-v1-red...acted", "limit": 20, "limit_remaining": 19, "usage_monthly": 1.0}},
+                ],
+            ):
+                result = collector.openrouter_usage(force=True)
+
+            self.assertTrue(result["dsh"]["ok"])
+            self.assertEqual(result["dsh"]["key_source"], "file")
+            self.assertNotIn(file_key, json.dumps(result))
+
+    def test_openrouter_revoked_environment_key_retries_with_file_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            history = cache / "openrouter-history.jsonl"
+            key_file = root / "global.env"
+            env_key = "sk-or-v1-" + ("e" * 32)
+            file_key = "sk-or-v1-" + ("f" * 32)
+            key_file.write_text(f"OPENROUTER_API_KEY={file_key}\n", encoding="utf-8")
+            seats = ({"seat": "global", "path": key_file, "variable": "OPENROUTER_API_KEY"},)
+            fetch = mock.Mock(
+                side_effect=[
+                    RuntimeError("HTTP 401"),
+                    {"data": {"total_credits": 120, "total_usage": 30.0}},
+                    {"data": {"label": "sk-or-v1-file...safe", "limit": 40, "limit_remaining": 10, "usage_monthly": 30.0}},
+                ]
+            )
+            with mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                OPENROUTER_CACHE=cache / "openrouter.json",
+                OPENROUTER_HISTORY=history,
+                OPENROUTER_SEATS=seats,
+                KNOWN_CACHE_FILES=(cache / "openrouter.json",),
+            ), mock.patch.dict(
+                os.environ,
+                {"OPENROUTER_API_KEY": env_key},
+            ), mock.patch.object(
+                collector,
+                "_openrouter_fetch_json",
+                fetch,
+            ):
+                result = collector.openrouter_usage(force=True)
+
+            self.assertTrue(result["global"]["ok"])
+            self.assertEqual(result["global"]["key_source"], "fallback")
+            self.assertEqual(result["global"]["account_credits"], 120)
+            self.assertEqual(result["global"]["used_pct"], 25)
+            self.assertEqual(fetch.call_args_list[0].args[1], env_key)
+            self.assertEqual(fetch.call_args_list[1].args[1], file_key)
+            self.assertEqual(fetch.call_args_list[2].args[1], file_key)
+            self.assertNotIn(env_key, json.dumps(result))
+
+    def test_openrouter_ttl_second_read_makes_no_network_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            history = cache / "openrouter-history.jsonl"
+            seats = (
+                {"seat": "dsh", "path": root / "dsh.env", "variable": "DEEPSEEK_API_KEY"},
+                {"seat": "global", "path": root / "global.env", "variable": "OPENROUTER_API_KEY"},
+            )
+            for seat in seats:
+                seat["path"].write_text(
+                    f'{seat["variable"]}=sk-or-v1-{"a" * 32}\n', encoding="utf-8"
+                )
+            responses = [
+                {"data": {"total_credits": 50, "total_usage": 1.0}},
+                {"data": {"label": "sk-or-v1-dsh...", "limit": 20, "limit_remaining": 19, "usage_monthly": 1.0}},
+                {"data": {"total_credits": 100, "total_usage": 2.0}},
+                {"data": {"label": "sk-or-v1-global...", "limit": None, "limit_remaining": None, "usage_monthly": 2.0}},
+            ]
+            with mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                OPENROUTER_CACHE=cache / "openrouter.json",
+                OPENROUTER_HISTORY=history,
+                OPENROUTER_SEATS=seats,
+                KNOWN_CACHE_FILES=(cache / "openrouter.json",),
+            ), mock.patch.object(
+                collector,
+                "_openrouter_fetch_json",
+                side_effect=responses,
+            ) as fetch:
+                first = collector.openrouter_usage(force=True)
+                fetch.reset_mock()
+                second = collector.openrouter_usage()
+
+            self.assertEqual(fetch.call_count, 0)
+            self.assertEqual(second, first)
+
+    def test_openrouter_requests_have_per_seat_deadlines_inside_total_budget(self) -> None:
+        seats = (
+            {"seat": "dsh", "path": Path("/tmp/dsh.env"), "variable": "DEEPSEEK_API_KEY"},
+            {"seat": "global", "path": Path("/tmp/global.env"), "variable": "OPENROUTER_API_KEY"},
+        )
+        responses = [
+            {"data": {"total_credits": 50, "total_usage": 1.0}},
+            {"data": {"label": "sk-or-v1-dsh...", "limit": 20, "limit_remaining": 19, "usage_monthly": 1.0}},
+            {"data": {"total_credits": 100, "total_usage": 2.0}},
+            {"data": {"label": "sk-or-v1-global...", "limit": None, "limit_remaining": None, "usage_monthly": 2.0}},
+        ]
+        fetch = mock.Mock(side_effect=responses)
+        with mock.patch.multiple(
+            collector,
+            OPENROUTER_SEATS=seats,
+            _openrouter_key=mock.Mock(return_value="sk-or-v1-" + ("a" * 32)),
+            _openrouter_fetch_json=fetch,
+            _write_cache_json=mock.Mock(),
+        ), mock.patch.object(
+            collector.time,
+            "monotonic",
+            side_effect=[100.0, 100.0, 100.5],
+        ):
+            collector.openrouter_usage(force=True)
+
+        calls = fetch.call_args_list
+        self.assertEqual(len(calls), 4)
+        deadlines = [call.kwargs["deadline"] for call in calls]
+        self.assertEqual(deadlines[:2], [101.5, 101.5])
+        self.assertEqual(deadlines[2:], [102.0, 102.0])
+        self.assertLessEqual(max(deadlines) - 100.0, collector.OPENROUTER_TOTAL_DEADLINE)
+
+    def test_openrouter_requests_never_exceed_shared_collector_deadline(self) -> None:
+        seats = (
+            {"seat": "dsh", "path": Path("/tmp/dsh.env"), "variable": "DEEPSEEK_API_KEY"},
+            {"seat": "global", "path": Path("/tmp/global.env"), "variable": "OPENROUTER_API_KEY"},
+        )
+        responses = [
+            {"data": {"total_credits": 50, "total_usage": 1.0}},
+            {"data": {"label": "sk-or-v1-dsh...", "limit": 20, "limit_remaining": 19, "usage_monthly": 1.0}},
+            {"data": {"total_credits": 100, "total_usage": 2.0}},
+            {"data": {"label": "sk-or-v1-global...", "limit": None, "limit_remaining": None, "usage_monthly": 2.0}},
+        ]
+        fetch = mock.Mock(side_effect=responses)
+        collector_start = 1000.0
+        shared_deadline = collector_start + collector.COLLECTOR_WATCHDOG_BUDGET_SECONDS
+        openrouter_call_time = collector_start + 7.0
+        with mock.patch.multiple(
+            collector,
+            OPENROUTER_SEATS=seats,
+            _openrouter_key=mock.Mock(return_value="sk-or-v1-" + ("a" * 32)),
+            _openrouter_fetch_json=fetch,
+            _write_cache_json=mock.Mock(),
+            _append_openrouter_history=mock.Mock(),
+        ), mock.patch.object(
+            collector.time,
+            "monotonic",
+            side_effect=[openrouter_call_time, openrouter_call_time, openrouter_call_time + 0.05],
+        ):
+            collector.openrouter_usage(force=True, deadline=shared_deadline)
+
+        deadlines = [call.kwargs["deadline"] for call in fetch.call_args_list]
+        self.assertEqual(len(deadlines), 4)
+        for request_deadline in deadlines:
+            self.assertLessEqual(request_deadline, shared_deadline)
+        self.assertLess(
+            max(deadlines) - openrouter_call_time,
+            collector.OPENROUTER_SEAT_DEADLINE,
+        )
+
+    def test_openrouter_schema_keeps_null_key_limits_and_isolates_seat_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            history = cache / "openrouter-history.jsonl"
+            openrouter_cache = cache / "openrouter.json"
+            seats = (
+                {"seat": "dsh", "path": root / "dsh.env", "variable": "DEEPSEEK_API_KEY"},
+                {"seat": "global", "path": root / "global.env", "variable": "OPENROUTER_API_KEY"},
+            )
+            with mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                OPENROUTER_CACHE=openrouter_cache,
+                OPENROUTER_HISTORY=history,
+                OPENROUTER_SEATS=seats,
+                KNOWN_CACHE_FILES=(openrouter_cache,),
+            ), mock.patch.object(
+                collector,
+                "_openrouter_key",
+                side_effect=lambda seat: "test-key-" + str(seat["seat"]),
+            ), mock.patch.object(
+                collector,
+                "_openrouter_fetch_json",
+                side_effect=[
+                    {"data": {"total_credits": 50, "total_usage": 0.4527}},
+                    {"data": {"label": "sk-or-v1-cef...1b7", "limit": 20, "limit_remaining": 19.55, "usage_monthly": 0.4542}},
+                    {"data": {"total_credits": 246, "total_usage": 231.30}},
+                    RuntimeError("HTTP 403"),
+                ],
+            ):
+                result = collector.openrouter_usage(force=True)
+
+            self.assertTrue(result["dsh"]["ok"])
+            self.assertEqual(result["dsh"]["label"], "sk-or-v1-cef...1b7")
+            self.assertEqual(result["dsh"]["used_pct"], 1)
+            for field in (
+                "ok", "seat", "key_source", "label", "account_credits", "account_usage",
+                "account_remaining", "key_limit", "key_limit_remaining",
+                "key_usage_monthly", "used_pct", "delta_today", "delta_7d",
+                "daily_avg", "_fetched_at", "_fetched_at_ts",
+            ):
+                self.assertIn(field, result["dsh"])
+            self.assertTrue(result["global"]["ok"] is False)
+            self.assertEqual(result["global"]["error"], "HTTP 403")
+            self.assertIsNone(result["global"]["key_limit"])
+            self.assertNotIn("test-key", json.dumps(result))
+
+            # A successful null-limit response is valid and must not format or
+            # calculate None as if it were a number.
+            with mock.patch.object(collector, "_openrouter_key", return_value="test-key"), mock.patch.object(
+                collector,
+                "_openrouter_fetch_json",
+                side_effect=[
+                    {"data": {"total_credits": 246, "total_usage": 231.30}},
+                    {"data": {"label": "sk-or...safe", "limit": None, "limit_remaining": None, "usage_monthly": 2.0}},
+                ],
+            ):
+                null_limit = collector.openrouter_usage(force=True)
+            self.assertTrue(null_limit["dsh"]["ok"])
+            self.assertIsNone(null_limit["dsh"]["key_limit"])
+            self.assertIsNone(null_limit["dsh"]["key_limit_remaining"])
+
+    def test_build_snapshot_passes_shared_deadline_to_openrouter(self) -> None:
+        patches = self.base_patches()[:-1]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with mock.patch.object(
+            collector,
+            "openrouter_usage",
+            return_value={
+                "dsh": {"ok": True, "seat": "dsh", "used_pct": 1},
+                "global": {"ok": True, "seat": "global", "used_pct": 94},
+            },
+        ) as mocked:
+            collector.build_snapshot()
+
+        self.assertIn("deadline", mocked.call_args.kwargs)
+        self.assertIsInstance(mocked.call_args.kwargs["deadline"], float)
+
     def base_patches(self) -> list[mock._patch]:
         return [
             mock.patch.object(collector, "host_metrics", return_value=provider(mem_pct=10, swap_mb=0)),
@@ -222,6 +543,14 @@ class SnapshotContractTests(unittest.TestCase):
                 "collect_ledger_summary",
                 return_value={"schema_version": 2, "ok": True, "status": "live"},
             ),
+            mock.patch.object(
+                collector,
+                "openrouter_usage",
+                return_value={
+                    "dsh": {"ok": True, "seat": "dsh", "used_pct": 1},
+                    "global": {"ok": True, "seat": "global", "used_pct": 94},
+                },
+            ),
         ]
 
     def test_snapshot_contains_versioned_ledger_and_existing_sections(self) -> None:
@@ -233,8 +562,9 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(snapshot["schema_version"], 2)
         self.assertEqual(snapshot["ledger"]["schema_version"], 2)
         self.assertEqual(snapshot["ledger"]["status"], "live")
-        for name in ("host", "claude", "codex", "opencode_go", "grok", "antigravity", "tokentracker", "rag"):
+        for name in ("host", "claude", "codex", "opencode_go", "grok", "grok_seats", "openrouter", "antigravity", "tokentracker", "rag"):
             self.assertIn(name, snapshot)
+        self.assertEqual(snapshot["openrouter"]["global"]["used_pct"], 94)
         self.assertEqual(snapshot["tokentracker"]["status"], "live")
         self.assertEqual(snapshot["rag"]["status"], "online")
         self.assertEqual(snapshot["rag"]["documents"]["total"], 2)
@@ -387,7 +717,7 @@ class SnapshotContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
     def test_real_ledger_failure_shape_does_not_break_build(self) -> None:
-        patches = self.base_patches()[:-1]
+        patches = self.base_patches()[:8]
         for patcher in patches:
             patcher.start()
             self.addCleanup(patcher.stop)

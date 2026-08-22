@@ -63,7 +63,7 @@ local SECTION_ORDER = { "compute", "radar", "loaders", "providers" }
 local TILE_ORDER_DEFAULTS = {
   token_kpis = { "today", "3d", "7d", "30d" },
   token_sources = { "claude", "codex", "free", "local", "other" },
-  providers = { "claude", "codex", "go", "grok", "antigravity", "mac" },
+  providers = { "claude", "codex", "go", "grok", "openrouter", "antigravity", "mac" },
 }
 
 local GLASS_PRESETS = {
@@ -278,7 +278,7 @@ local prefs = {
   section_order = { "compute", "radar", "loaders", "providers" },
   token_kpi_order = { "today", "3d", "7d", "30d" },
   token_source_order = { "claude", "codex", "free", "local", "other" },
-  provider_order = { "claude", "codex", "go", "grok", "antigravity", "mac" },
+  provider_order = { "claude", "codex", "go", "grok", "openrouter", "antigravity", "mac" },
 }
 
 local function normalizedSectionOrder(value)
@@ -906,6 +906,7 @@ local PROVIDER_META = {
   codex = { label = "Codex", accent = "#10A37F" },
   go = { label = "OpenCode Go", accent = "#FF9F0A" },
   grok = { label = "Grok", accent = "#BF5AF2" },
+  openrouter = { label = "OpenRouter", accent = "#0A84FF" },
   antigravity = { label = "Antigravity", accent = "#4285F4" },
   mac = { label = "Mac", accent = "#0A84FF" },
 }
@@ -1491,6 +1492,7 @@ local function tokenSourceLineHTML(points, days, label)
     { id="claude", label="Claude", class="claude-line" },
     { id="codex", label="Codex", class="codex-line" },
     { id="grok", label="Grok", class="grok-line" },
+    { id="openrouter", label="OpenRouter", class="openrouter-line" },
     { id="free_cloud", label="免費雲", class="free-line" },
     { id="local_compute", label="本地", class="local-line" },
     { id="other", label="其他", class="other-line" },
@@ -1506,6 +1508,7 @@ local function tokenSourceLineHTML(points, days, label)
     local lower = id:lower()
     local core = id == "claude-code-oauth-quota" or id == "codex-plus-subscription"
       or lower:find("grok", 1, true) or lower:find("xai", 1, true)
+      or lower:find("openrouter", 1, true)
       or lower:find("local-", 1, true) == 1 or lower:find("free", 1, true)
     if not core then table.insert(ranked, { id=id, total=total }) end
   end
@@ -1897,6 +1900,7 @@ buildHTML = function(s)
   local cx = s.codex or {}
   local go = s.opencode_go or {}
   local gk = s.grok or {}
+  local openrouter = s.openrouter or {}
   local ag = s.antigravity or {}
   local goLocal = go["local"] or {}
   local goCaps = go.caps or {}
@@ -2199,6 +2203,82 @@ buildHTML = function(s)
     }
   end
 
+  -- OpenRouter has two independently billed accounts. Keep each seat as its
+  -- own row so account credits are never visually or mathematically merged.
+  local openrouterSeatCards = {}
+  local openrouterSheets = ""
+  local function deltaMoney(value)
+    local n = tonumber(value)
+    if n == nil then return "—" end
+    if n < 0 then return string.format("−$%.2f", math.abs(n)) end
+    return string.format("+$%.2f", n)
+  end
+  local function buildOpenRouterSeat(seatName, seat)
+    seat = type(seat) == "table" and seat or { ok = false, error = "尚無資料" }
+    local accountCredits = tonumber(seat.account_credits)
+    local accountRemaining = tonumber(seat.account_remaining)
+    local remainingPct = accountCredits and accountCredits > 0 and accountRemaining
+      and (accountRemaining * 100 / accountCredits) or nil
+    local lowBalance = remainingPct ~= nil and remainingPct < 20
+    local main
+    if seat.ok ~= true then
+      main = "離線"
+    elseif accountRemaining ~= nil and seat.used_pct ~= nil then
+      main = (lowBalance and "⚠ " or "") .. money(accountRemaining)
+        .. " 剩餘 · 已用 " .. pctText(seat.used_pct)
+    else
+      main = "餘額未知 · 已用 " .. pctText(seat.used_pct)
+    end
+    local keyUsage = money(seat.key_usage_monthly)
+    local keyLimit = money(seat.key_limit)
+    local sub
+    if seat.ok ~= true then
+      sub = seat.error or "尚無 OpenRouter key"
+    else
+      sub = "key 月 " .. keyUsage .. " / " .. keyLimit
+        .. " · 今日 " .. deltaMoney(seat.delta_today)
+        .. " · 近 7 日 " .. deltaMoney(seat.delta_7d)
+      if lowBalance then sub = "⚠ 帳號餘額低於 20% · " .. sub end
+    end
+    local rows = {}
+    if seat.ok == true then
+      table.insert(rows, {
+        label = "帳號餘額 / 已用",
+        usage = money(seat.account_remaining) .. " · " .. pctText(seat.used_pct),
+        reset = "—",
+      })
+      table.insert(rows, {
+        label = "Key 月用量 / 上限",
+        usage = keyUsage .. " / " .. keyLimit,
+        reset = "—",
+      })
+      table.insert(rows, { label = "今日增量", usage = deltaMoney(seat.delta_today), reset = "—" })
+      table.insert(rows, { label = "近 7 日增量 / 日均", usage = deltaMoney(seat.delta_7d) .. " / " .. deltaMoney(seat.daily_avg), reset = "—" })
+    else
+      table.insert(rows, { label = "狀態", usage = seat.error or "離線", reset = "—" })
+    end
+    local id = "openrouter-" .. tostring(seatName)
+    openrouterSheets = openrouterSheets .. providerUsageSheetHTML(
+      id,
+      "OpenRouter · " .. tostring(seatName),
+      "帳號 credits 與此 key 的月用量",
+      rows,
+      "OpenRouter credits + key"
+    )
+    return rowHTML({
+      id = id,
+      name = "OpenRouter · " .. tostring(seatName),
+      badge = seat.label or "OpenRouter",
+      accent = lowBalance and "#FF453A" or "#0A84FF",
+      main = main,
+      sub = sub,
+      bars = seat.ok == true and {{ label = "帳號已用", pct = seat.used_pct }} or {},
+    })
+  end
+  for _, seatName in ipairs({ "dsh", "global" }) do
+    table.insert(openrouterSeatCards, buildOpenRouterSeat(seatName, openrouter[seatName]))
+  end
+
   -- Compact main line: GB not "13935 / 15360 MB". Bar uses absolute pressure pct.
   local swapMain = formatSwapShort(host.swap_mb)
   local memMain = string.format("H %s · MEM %s · %s",
@@ -2418,6 +2498,7 @@ buildHTML = function(s)
       bars = goBars,
     }),
     grok = table.concat(gkSeatCards, "\n"),
+    openrouter = table.concat(openrouterSeatCards, "\n"),
     antigravity = table.concat(agSeatCards, "\n"),
     mac = rowHTML({
       id = "mac",
@@ -2554,6 +2635,7 @@ buildHTML = function(s)
       "G1/G2/G3 週額度 + 月 credits（週=官方或本機 billing 快照估）",
       gkSeatSheetRows,
       gk.source or gk.weekly_note)
+    .. openrouterSheets
     .. providerUsageSheetHTML("antigravity", "Antigravity Usage · 多帳號",
       "A0/A1/A2 各帳號模型視窗額度",
       agSeatSheetRows,
@@ -3449,6 +3531,7 @@ buildHTML = function(s)
   .claude-line { stroke:#D97757; }
   .codex-line { stroke:#10A37F; }
   .grok-line { stroke:#F5F5F7; }
+  .openrouter-line { stroke:#0A84FF; }
   .other-line { stroke:#BF5AF2; }
   .top-one-line { stroke:#FF9F0A; stroke-dasharray:5 3; }
   .top-two-line { stroke:#FF375F; stroke-dasharray:3 3; }
@@ -3460,6 +3543,7 @@ buildHTML = function(s)
   .claude-legend span::before { background:#D97757; }
   .codex-legend span::before { background:#10A37F; }
   .grok-legend span::before { background:#F5F5F7; }
+  .openrouter-legend span::before { background:#0A84FF; }
   .free-cloud-legend span::before { background:var(--chart-free); }
   .local-compute-legend span::before { background:var(--chart-local); }
   .other-legend span::before { background:#BF5AF2; }
