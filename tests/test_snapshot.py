@@ -20,6 +20,38 @@ def provider(ok: bool = True, **values: object) -> dict[str, object]:
 
 
 class SnapshotContractTests(unittest.TestCase):
+    def test_resolve_grok_monthly_pool_prefers_api(self) -> None:
+        pool = collector._resolve_grok_monthly_pool(15000.0)
+        self.assertFalse(pool["limit_missing"])
+        self.assertEqual(pool["limit_source"], "api")
+        self.assertEqual(pool["monthly_limit"], 15000.0)
+        self.assertEqual(pool["monthly_limit_api"], 15000.0)
+
+    def test_resolve_grok_monthly_pool_history_then_default(self) -> None:
+        """API limit=0 → last non-zero history; empty history → plan default."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hist = Path(tmp) / "h.jsonl"
+            hist.write_text(
+                "\n".join([
+                    json.dumps({"ts": "2026-08-01T00:00:00+00:00", "used": 100.0, "monthly_limit": 15000.0}),
+                    json.dumps({"ts": "2026-08-11T00:00:00+00:00", "used": 175.0, "monthly_limit": 0.0}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            pool = collector._resolve_grok_monthly_pool(0.0, history_path=hist)
+            self.assertTrue(pool["limit_missing"])
+            self.assertEqual(pool["limit_source"], "history_last_nonzero")
+            self.assertEqual(pool["monthly_limit"], 15000.0)
+            self.assertEqual(pool["monthly_limit_api"], 0.0)
+            self.assertEqual(collector._grok_used_pct(175.0, pool["monthly_limit"]), 1)
+
+            empty = Path(tmp) / "empty.jsonl"
+            empty.write_text("", encoding="utf-8")
+            pool2 = collector._resolve_grok_monthly_pool(0.0, history_path=empty)
+            self.assertTrue(pool2["limit_missing"])
+            self.assertEqual(pool2["limit_source"], "plan_default")
+            self.assertEqual(pool2["monthly_limit"], collector.GROK_DEFAULT_MONTHLY_LIMIT)
+
     def test_grok_weekly_usage_extracts_pool_reset_and_product_breakdown(self) -> None:
         result = collector._grok_weekly_usage({
             "weeklyUsage": {

@@ -59,6 +59,10 @@ GROK_CHAT_GATE_TIMEOUT = 8.0
 # Bump this when the plan tier or price changes; nothing else will catch it.
 GROK_PLAN_NAME = "SuperGrok"
 GROK_PLAN_PRICE_USD_MO = 30.0
+# SuperGrok included monthly credit pool (hand-maintained; API used to return
+# this as monthlyLimit until ~2026-08-10 when it started returning 0).
+# Used only as soft fallback when API omits limit so MenuBar can show %.
+GROK_DEFAULT_MONTHLY_LIMIT = 15000.0
 GO_TTL_OK = 5 * 60
 GO_TTL_CAPPED = 15 * 60  # when already at limit, probe less often
 CLAUDE_FRESH_TTL = 90  # recent sanitized status/cache freshness window
@@ -71,10 +75,21 @@ AGY_CACHE = CACHE_DIR / "antigravity.json"
 AGY_TTL = 90  # live LS probe interval while agy is up
 AGY_STALE_TTL = 6 * 60 * 60  # keep last-known-good when CLI briefly exits
 AGY_RPC = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
-AGY_MAX_PORTS = 4
+AGY_MAX_PORTS = 8  # raised: up to 4 accounts × 2 ports each (LS + web)
 AGY_MAX_MODELS = 12
 AGY_MAX_RESPONSE_BYTES = 256 * 1024
-AGY_TOTAL_DEADLINE = 4.0
+AGY_TOTAL_DEADLINE = 6.0  # slightly more headroom for multi-seat probing
+AGY_MAX_SEATS = 4
+# Maps JETSKI_APP_DATA_DIR values to human-readable seat numbers.
+# "antigravity-cli" is the default (original agy); agy-account-N are wrappers.
+AGY_SEAT_DATA_DIRS: dict[str, int] = {
+    "antigravity-cli": 0,  # original default agy
+    "agy-account-1": 1,
+    "agy-account-2": 2,
+    "agy-account-3": 3,
+    "agy-account-4": 4,
+}
+AGY_SEAT_CACHES = tuple(CACHE_DIR / f"antigravity-seat-{n}.json" for n in range(AGY_MAX_SEATS + 1))
 # Process names / path fragments that legitimately host the Antigravity LS.
 AGY_COMM_NAMES = frozenset({"agy", "agy-node", "Antigravity", "antigravity"})
 AGY_PATH_MARKERS = (
@@ -83,7 +98,7 @@ AGY_PATH_MARKERS = (
     "/bin/agy",
     "agy-node",
 )
-KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE, *GROK_SEAT_CACHES)
+KNOWN_CACHE_FILES = (OUT, GROK_CACHE, GO_CACHE, AGY_CACHE, CLAUDE_CACHE, *GROK_SEAT_CACHES, *AGY_SEAT_CACHES)
 
 
 def _now() -> float:
@@ -425,6 +440,67 @@ def _append_grok_billing_history_to(used: float | None, monthly_limit: float | N
         pass
 
 
+def _last_nonzero_monthly_limit(history_path: Path | None = None) -> float | None:
+    """Scan billing history for the most recent non-zero monthly_limit."""
+    path = history_path if history_path is not None else GROK_HISTORY
+    if path is None or not path.exists():
+        return None
+    last: float | None = None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            lim = row.get("monthly_limit")
+            if lim is None:
+                continue
+            lim_f = float(lim)
+            if lim_f > 0:
+                last = lim_f
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return last
+    return last
+
+
+def _resolve_grok_monthly_pool(
+    api_limit: float | None,
+    history_path: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve display monthly credit pool when API omits/zeros monthlyLimit.
+
+    Priority: API (>0) → last non-zero history → SuperGrok plan default.
+    Soft fallbacks set limit_missing=True so UI can badge 「軟估」.
+    """
+    api_raw = float(api_limit) if api_limit is not None else None
+    if api_raw is not None and api_raw > 0:
+        return {
+            "monthly_limit": api_raw,
+            "monthly_limit_api": api_raw,
+            "limit_missing": False,
+            "limit_source": "api",
+        }
+    hist = _last_nonzero_monthly_limit(history_path)
+    if hist is not None and hist > 0:
+        return {
+            "monthly_limit": float(hist),
+            "monthly_limit_api": api_raw,
+            "limit_missing": True,
+            "limit_source": "history_last_nonzero",
+        }
+    return {
+        "monthly_limit": float(GROK_DEFAULT_MONTHLY_LIMIT),
+        "monthly_limit_api": api_raw,
+        "limit_missing": True,
+        "limit_source": "plan_default",
+    }
+
+
+def _grok_used_pct(used: float | None, monthly_limit: float | None) -> int | None:
+    if used is not None and monthly_limit and monthly_limit > 0:
+        return max(0, min(100, int(round(100.0 * float(used) / float(monthly_limit)))))
+    return None
+
+
 def _grok_weekly_from_history(
     current_used: float | None,
     monthly_limit: float | None,
@@ -502,12 +578,23 @@ def _grok_weekly_from_history(
         try:
             if period_start:
                 ps = datetime.fromisoformat(str(period_start).replace("Z", "+00:00"))
-                days_into = max(1.0, (datetime.now(timezone.utc) - ps).total_seconds() / 86400.0)
-                days_before_week = max(0.0, (week_start - ps).total_seconds() / 86400.0)
-                baseline_est = float(current_used) * (days_before_week / days_into)
-                weekly_used = max(0.0, float(current_used) - baseline_est)
-                weekly_source = "linear_period_estimate"
-                weekly_note = "CLI 無官方週額度；以月 credits 線性估本週用量（週上限=月額×7/月天數）"
+                now = datetime.now(timezone.utc)
+                days_into = max(1.0, (now - ps).total_seconds() / 86400.0)
+                # If billing period started this week, all MTD credits are this week.
+                # Soft weekly_limit is still month×7/days — do NOT treat early-month
+                # front-load as hard 100% cap (UI de-emphasizes linear estimates).
+                if ps >= week_start:
+                    weekly_used = max(0.0, float(current_used))
+                    weekly_source = "linear_period_estimate"
+                    weekly_note = (
+                        "計費週自本週開始；本週用量=本月已用（軟上限=月額×7/月天，非硬鎖）"
+                    )
+                else:
+                    days_before_week = max(0.0, (week_start - ps).total_seconds() / 86400.0)
+                    baseline_est = float(current_used) * (days_before_week / days_into)
+                    weekly_used = max(0.0, float(current_used) - baseline_est)
+                    weekly_source = "linear_period_estimate"
+                    weekly_note = "CLI 無官方週額度；以月 credits 線性估本週用量（週上限=月額×7/月天數）"
             else:
                 weekly_used = 0.0
                 weekly_source = "billing_snapshot_pending"
@@ -519,6 +606,7 @@ def _grok_weekly_from_history(
 
     used_pct = None
     if weekly_used is not None and weekly_limit and weekly_limit > 0:
+        # Cap display at 100; raw weekly_used may exceed soft pro-rata limit.
         used_pct = max(0, min(100, int(round(100.0 * weekly_used / weekly_limit))))
 
     return {
@@ -645,20 +733,28 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
 
     cfg = body.get("config") if isinstance(body.get("config"), dict) else body
     used = _money_val(cfg.get("used"))
-    limit = _money_val(cfg.get("monthlyLimit"))
-    pct = None
-    if used is not None and limit and limit > 0:
-        pct = max(0, min(100, int(round(100.0 * used / limit))))
+    api_limit = _money_val(cfg.get("monthlyLimit"))
+    pool = _resolve_grok_monthly_pool(api_limit, history_path=GROK_HISTORY)
+    limit = pool["monthly_limit"]
+    pct = _grok_used_pct(used, limit)
 
     weekly_fields = _grok_weekly_usage(cfg)
-    # If API had no weekly block, estimate from history using monthly used/limit.
-    if not weekly_fields.get("weekly_available"):
+    # Prefer official weekly block; otherwise estimate with *effective* monthly
+    # pool (soft limit when API returns 0).
+    if (
+        not weekly_fields.get("weekly_available")
+        or weekly_fields.get("weekly_source") != "api"
+    ):
         weekly_fields = _grok_weekly_from_history(
             current_used=used,
             monthly_limit=limit,
             period_start=cfg.get("billingPeriodStart"),
             period_end=cfg.get("billingPeriodEnd"),
         )
+        if pool["limit_missing"] and weekly_fields.get("weekly_available"):
+            note = weekly_fields.get("weekly_note") or ""
+            tag = "月上限軟估（API 未回）"
+            weekly_fields["weekly_note"] = f"{note}；{tag}" if note else tag
 
     result = {
         "ok": True,
@@ -667,6 +763,9 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         "price": f"${GROK_PLAN_PRICE_USD_MO:g}/mo",
         "used": used,
         "monthly_limit": limit,
+        "monthly_limit_api": pool["monthly_limit_api"],
+        "limit_missing": pool["limit_missing"],
+        "limit_source": pool["limit_source"],
         "used_pct": pct,
         "on_demand_cap": _money_val(cfg.get("onDemandCap")),
         "period_start": cfg.get("billingPeriodStart"),
@@ -677,7 +776,8 @@ def grok_usage(force: bool = False) -> dict[str, Any]:
         **weekly_fields,
     }
     _annotate_grok_enforcement(result, token)
-    _append_grok_billing_history(used, limit)
+    # History stores raw API limit so last-nonzero fallback stays honest.
+    _append_grok_billing_history(used, api_limit)
     try:
         _write_cache_json(GROK_CACHE, result)
     except OSError:
@@ -859,6 +959,34 @@ def _annotate_grok_enforcement(
     return result
 
 
+def _grok_seat_stale_fallback(
+    cache_path: Path,
+    seat_num: int,
+    email: str,
+    err: str,
+) -> dict[str, Any] | None:
+    """On transient billing failure, prefer last good seat cache over '離線'."""
+    if not cache_path.is_file():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(cached, dict) or not cached.get("ok"):
+        return None
+    # Require a prior successful billing payload (used/limit), not a bare error shell.
+    if cached.get("used") is None and cached.get("monthly_limit") is None:
+        return None
+    out = dict(cached)
+    out["seat"] = seat_num
+    out["email"] = email
+    out["active"] = True
+    out["stale"] = True
+    out["stale_error"] = err
+    out["status_label"] = (out.get("status_label") or "正常") + "·快取"
+    return out
+
+
 def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     """Fetch billing for one grok-seat, with per-seat cache and history."""
     seat_dir = GROK_SEATS_ROOT / str(seat_num)
@@ -875,8 +1003,10 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             # Require chat_gate so pre-probe caches are not treated as "正常".
+            # Never reuse a failed shell (ok=false) as a warm cache hit.
             if (
-                _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL
+                cached.get("ok") is True
+                and _now() - float(cached.get("_fetched_at_ts", 0)) < GROK_TTL
                 and "chat_gate" in cached
             ):
                 cached["seat"] = seat_num
@@ -906,21 +1036,32 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
         with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=12) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        return {"ok": False, "seat": seat_num, "email": email, "error": f"HTTP {e.code}", "active": True}
+        err = f"HTTP {e.code}"
+        stale = _grok_seat_stale_fallback(cache_path, seat_num, email, err)
+        if stale is not None:
+            return stale
+        return {"ok": False, "seat": seat_num, "email": email, "error": err, "active": True}
     except Exception as e:
-        return {"ok": False, "seat": seat_num, "email": email, "error": _safe_error(e), "active": True}
+        err = _safe_error(e)
+        stale = _grok_seat_stale_fallback(cache_path, seat_num, email, err)
+        if stale is not None:
+            return stale
+        return {"ok": False, "seat": seat_num, "email": email, "error": err, "active": True}
     
     cfg = body.get("config") if isinstance(body.get("config"), dict) else body
     used = _money_val(cfg.get("used"))
-    limit = _money_val(cfg.get("monthlyLimit"))
-    pct_val = None
-    if used is not None and limit and limit > 0:
-        pct_val = max(0, min(100, int(round(100.0 * used / limit))))
+    api_limit = _money_val(cfg.get("monthlyLimit"))
+    pool = _resolve_grok_monthly_pool(api_limit, history_path=history_path)
+    limit = pool["monthly_limit"]
+    pct_val = _grok_used_pct(used, limit)
     
     # Always pass this seat's history — default GROK_HISTORY is a different
     # account and will poison weekly deltas (G2 inflated / G3 floored to 0).
     weekly_fields = _grok_weekly_usage(cfg, history_path=history_path)
-    if not weekly_fields.get("weekly_available"):
+    if (
+        not weekly_fields.get("weekly_available")
+        or weekly_fields.get("weekly_source") != "api"
+    ):
         weekly_fields = _grok_weekly_from_history(
             current_used=used,
             monthly_limit=limit,
@@ -928,6 +1069,10 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
             period_end=cfg.get("billingPeriodEnd"),
             history_path=history_path,
         )
+        if pool["limit_missing"] and weekly_fields.get("weekly_available"):
+            note = weekly_fields.get("weekly_note") or ""
+            tag = "月上限軟估（API 未回）"
+            weekly_fields["weekly_note"] = f"{note}；{tag}" if note else tag
     
     result = {
         "ok": True,
@@ -939,6 +1084,9 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
         "price": f"${GROK_PLAN_PRICE_USD_MO:g}/mo",
         "used": used,
         "monthly_limit": limit,
+        "monthly_limit_api": pool["monthly_limit_api"],
+        "limit_missing": pool["limit_missing"],
+        "limit_source": pool["limit_source"],
         "used_pct": pct_val,
         "on_demand_cap": _money_val(cfg.get("onDemandCap")),
         "period_start": cfg.get("billingPeriodStart"),
@@ -950,7 +1098,8 @@ def _grok_seat_billing(seat_num: int, force: bool = False) -> dict[str, Any]:
     }
     _annotate_grok_enforcement(result, token)
     
-    _append_grok_billing_history_to(used, limit, history_path)
+    # Persist raw API limit (0/null) so history_last_nonzero stays meaningful.
+    _append_grok_billing_history_to(used, api_limit, history_path)
     try:
         _write_cache_json(cache_path, result)
     except OSError:
@@ -1857,6 +2006,267 @@ def antigravity_usage(force: bool = False) -> dict[str, Any]:
     return result
 
 
+# ── AGY multi-seat (per-account) probing ─────────────────────────────────
+
+
+def _agy_pid_to_seat(pid: str, deadline: float) -> int:
+    """Read JETSKI_APP_DATA_DIR from a running agy process to identify the seat.
+
+    Returns the seat number (0 = original, 1-4 = agy-account-N) or -1 if
+    the env var is not readable or not in the known mapping.
+    """
+    try:
+        env_output = subprocess.check_output(
+            ["/bin/ps", "-p", pid, "-wwE"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=_remaining(deadline, 0.6),
+        )
+        # Parse JETSKI_APP_DATA_DIR=<value> from the env dump
+        for token in env_output.split():
+            if token.startswith("JETSKI_APP_DATA_DIR="):
+                data_dir = token.split("=", 1)[1].strip()
+                return AGY_SEAT_DATA_DIRS.get(data_dir, -1)
+        # No JETSKI_APP_DATA_DIR found → default agy (seat 0)
+        return AGY_SEAT_DATA_DIRS.get("antigravity-cli", 0)
+    except (OSError, subprocess.SubprocessError):
+        return -1
+
+
+def _find_agy_seat_ports(deadline: float) -> dict[int, list[int]]:
+    """Map seat numbers to their listen ports.
+
+    Returns {seat_num: [port, ...]} for all discovered agy processes.
+    """
+    seat_ports: dict[int, list[int]] = {}
+    pid_seats: dict[str, int] = {}
+
+    for pid in _verified_agy_pids(deadline):
+        if time.monotonic() >= deadline:
+            break
+        seat = _agy_pid_to_seat(pid, deadline)
+        if seat < 0:
+            continue
+        pid_seats[pid] = seat
+
+    for pid, seat in pid_seats.items():
+        if time.monotonic() >= deadline:
+            break
+        try:
+            output = subprocess.check_output(
+                [
+                    "/usr/sbin/lsof",
+                    "-nP",
+                    "-a",
+                    "-p",
+                    pid,
+                    "-iTCP",
+                    "-sTCP:LISTEN",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_remaining(deadline, 0.8),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in output.splitlines():
+            host_port = None
+            if "127.0.0.1:" in line and "LISTEN" in line:
+                try:
+                    host_port = int(line.split("127.0.0.1:", 1)[1].split()[0].split("->", 1)[0])
+                except (ValueError, IndexError):
+                    host_port = None
+            elif "[::1]:" in line and "LISTEN" in line:
+                try:
+                    host_port = int(line.split("[::1]:", 1)[1].split()[0].split("->", 1)[0])
+                except (ValueError, IndexError):
+                    host_port = None
+            if host_port is None:
+                continue
+            if 1024 <= host_port <= 65535:
+                seat_ports.setdefault(seat, [])
+                if host_port not in seat_ports[seat]:
+                    seat_ports[seat].append(host_port)
+    return seat_ports
+
+
+def _agy_seat_from_cache(seat_num: int, max_age: float = AGY_STALE_TTL) -> dict[str, Any] | None:
+    """Return last-known-good per-seat Antigravity snapshot, or None."""
+    if seat_num < 0 or seat_num >= len(AGY_SEAT_CACHES):
+        return None
+    cache_path = AGY_SEAT_CACHES[seat_num]
+    if not cache_path.exists():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(cached, dict) or cached.get("ok") is not True:
+            return None
+        age = _now() - float(cached.get("_fetched_at_ts", 0))
+        if age < 0 or age > max_age:
+            return None
+        out = dict(cached)
+        out["stale"] = age > AGY_TTL
+        if out["stale"]:
+            out["source"] = "agy-seat-cache-stale"
+        return out
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _agy_seat_label(seat_num: int) -> str:
+    """Human-readable seat label: agy (default), agy1-agy4 (accounts)."""
+    if seat_num == 0:
+        return "agy"
+    return f"agy{seat_num}"
+
+
+def _agy_seat_probe(seat_num: int, ports: list[int], deadline: float, force: bool = False) -> dict[str, Any]:
+    """Probe one agy seat's local language server and return a status dict.
+
+    Follows the same pattern as _grok_seat_billing: per-seat cache, stale
+    fallback, and email extraction from the live probe.
+    """
+    label = _agy_seat_label(seat_num)
+    cache_path = AGY_SEAT_CACHES[seat_num] if 0 <= seat_num < len(AGY_SEAT_CACHES) else None
+
+    # Check per-seat cache first (unless forced)
+    if not force and cache_path is not None:
+        cached = _agy_seat_from_cache(seat_num, max_age=AGY_TTL)
+        if cached is not None:
+            cached["seat"] = seat_num
+            cached["label"] = label
+            return cached
+
+    # Live probe
+    body = None
+    for port in ports:
+        if time.monotonic() >= deadline:
+            break
+        body = _probe_agy_user_status(port, deadline)
+        if body:
+            break
+
+    if not body:
+        stale = _agy_seat_from_cache(seat_num, max_age=AGY_STALE_TTL)
+        if stale is not None:
+            stale["seat"] = seat_num
+            stale["label"] = label
+            stale["stale"] = True
+            stale["source"] = "agy-seat-cache-stale"
+            return stale
+        return {"ok": False, "seat": seat_num, "label": label, "error": "agy_seat_probe_failed", "active": True}
+
+    # Parse the response (same logic as antigravity_usage)
+    us = body.get("userStatus") if isinstance(body.get("userStatus"), dict) else body
+    plan_status = us.get("planStatus") if isinstance(us.get("planStatus"), dict) else {}
+    plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
+    plan_name = str(plan_info.get("planName") or us.get("userTier") or "—")[:80]
+    email = str(us.get("email") or "")[:120] or None
+
+    models: list[dict[str, Any]] = []
+    used_pcts: list[int] = []
+    resets: list[str] = []
+    cmcd = us.get("cascadeModelConfigData") if isinstance(us.get("cascadeModelConfigData"), dict) else {}
+    configs = cmcd.get("clientModelConfigs") if isinstance(cmcd.get("clientModelConfigs"), list) else []
+    for cfg in configs[:AGY_MAX_MODELS]:
+        if not isinstance(cfg, dict):
+            continue
+        qi = cfg.get("quotaInfo") if isinstance(cfg.get("quotaInfo"), dict) else {}
+        rem = qi.get("remainingFraction")
+        used_pct = None
+        if isinstance(rem, (int, float)) and math.isfinite(float(rem)):
+            rem = max(0.0, min(1.0, float(rem)))
+            used_pct = max(0, min(100, int(round((1.0 - rem) * 100))))
+            used_pcts.append(used_pct)
+        else:
+            rem = None
+        reset = qi.get("resetTime")
+        if isinstance(reset, str) and reset:
+            resets.append(reset)
+        models.append(
+            {
+                "label": str(cfg.get("label") or cfg.get("modelOrAlias") or "model")[:80],
+                "remaining_fraction": rem,
+                "used_pct": used_pct,
+                "reset_time": reset,
+            }
+        )
+
+    session_used_pct = max(used_pcts) if used_pcts else 0
+    prompt_monthly = plan_info.get("monthlyPromptCredits")
+    flow_monthly = plan_info.get("monthlyFlowCredits")
+    prompt_avail = plan_status.get("availablePromptCredits")
+    flow_avail = plan_status.get("availableFlowCredits")
+
+    def finite_optional(value: Any) -> float | None:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return None
+        return float(value)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "seat": seat_num,
+        "label": label,
+        "email": email,
+        "active": True,
+        "source": "agy-seat-local",
+        "plan": plan_name,
+        "used_pct": session_used_pct,
+        "session_used_pct": session_used_pct,
+        "models": models,
+        "prompt_credits_available": finite_optional(prompt_avail),
+        "prompt_credits_monthly": finite_optional(prompt_monthly),
+        "flow_credits_available": finite_optional(flow_avail),
+        "flow_credits_monthly": finite_optional(flow_monthly),
+        "next_reset": min(resets) if resets else None,
+        "_fetched_at": datetime.now(timezone.utc).isoformat(),
+        "_fetched_at_ts": _now(),
+    }
+    if cache_path is not None:
+        try:
+            _write_cache_json(cache_path, result)
+        except OSError:
+            pass
+    return result
+
+
+def agy_multi_seat_usage(force: bool = False) -> list[dict[str, Any]]:
+    """Collect status for all running agy seats (like grok_multi_seat_usage).
+
+    Discovers running agy processes, identifies which account each belongs to
+    via JETSKI_APP_DATA_DIR, probes each seat independently, and returns a
+    list of per-seat status dicts.
+    """
+    deadline = time.monotonic() + AGY_TOTAL_DEADLINE
+    seat_ports = _find_agy_seat_ports(deadline)
+
+    seats: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for seat_num in sorted(seat_ports.keys()):
+        if seat_num in seen:
+            continue
+        seen.add(seat_num)
+        ports = seat_ports[seat_num]
+        result = _agy_seat_probe(seat_num, ports, deadline, force=force)
+        seats.append(result)
+
+    # Also include stale cache entries for seats that are not currently running
+    # but were recently active (mirrors grok-seat stale fallback behavior).
+    for seat_num in range(AGY_MAX_SEATS + 1):
+        if seat_num in seen:
+            continue
+        stale = _agy_seat_from_cache(seat_num, max_age=AGY_STALE_TTL)
+        if stale is not None:
+            stale["seat"] = seat_num
+            stale["label"] = _agy_seat_label(seat_num)
+            stale["stale"] = True
+            stale["source"] = "agy-seat-cache-stale"
+            stale["active"] = False
+            seats.append(stale)
+
+    return seats
+
+
 def _safe_collect(label: str, function: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
     """Isolate optional collectors so one source cannot abort the snapshot."""
     try:
@@ -1887,6 +2297,10 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         grok_seats = []
     go = _safe_collect("opencode_go", opencode_go_usage, force=force_remote)
     agy = _safe_collect("antigravity", antigravity_usage, force=force_remote)
+    try:
+        agy_seats = agy_multi_seat_usage(force=force_remote)
+    except Exception:  # noqa: BLE001
+        agy_seats = []
     tokentracker = _safe_collect("tokentracker", tokentracker_usage)
     rag = _safe_collect("rag", rag_status)
     try:
@@ -1978,6 +2392,7 @@ def build_snapshot(force_remote: bool = False) -> dict[str, Any]:
         "grok": grok,
         "grok_seats": grok_seats,
         "antigravity": agy,
+        "agy_seats": agy_seats,
         "tokentracker": tokentracker,
         "rag": rag,
         "ledger": ledger,

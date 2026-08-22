@@ -1035,7 +1035,7 @@ local function rowHTML(opts)
   local chevron = ""
   if opts.static_card ~= true then
     openAttrs = string.format(' data-sheet-open="usage-%s" tabindex="0" role="button" aria-label="開啟 %s Usage 與重置時間"',
-      esc(opts.id or "unknown"), esc(opts.name or "Usage"))
+      esc(opts.sheet_id or opts.id or "unknown"), esc(opts.name or "Usage"))
     chevron = '<span class="usage-chevron" aria-hidden="true">›</span>'
   end
 
@@ -1116,7 +1116,19 @@ local function pressureFromSnapshot(s)
   add("O", "OpenCode", go.ok or go.live_status == "capped",
     go.live_status == "capped" and 100 or go.used_pct)
   add("K", "Grok", gk.ok, gk.used_pct)
-  add("A", "Antigravity", ag.ok, ag.used_pct or ag.session_used_pct)
+  -- Prefer legacy single-seat ag; fall back to first active multi-seat entry
+  local agRadarOk = ag.ok
+  local agRadarPct = ag.used_pct or ag.session_used_pct
+  if not agRadarOk then
+    for _, seat in ipairs(s.agy_seats or {}) do
+      if type(seat) == "table" and seat.ok then
+        agRadarOk = true
+        agRadarPct = seat.used_pct or seat.session_used_pct
+        break
+      end
+    end
+  end
+  add("A", "Antigravity", agRadarOk, agRadarPct)
   local mem = pct(host.mem_pct)
   local swap = tonumber(host.swap_mb) or 0
   if mem and (swap >= 64 or mem >= 70) then
@@ -1885,6 +1897,7 @@ buildHTML = function(s)
   local cx = s.codex or {}
   local go = s.opencode_go or {}
   local gk = s.grok or {}
+  local ag = s.antigravity or {}
   local goLocal = go["local"] or {}
   local goCaps = go.caps or {}
 
@@ -1962,64 +1975,111 @@ buildHTML = function(s)
     local wPct = seat.weekly_used_pct
     local wAvail = seat.weekly_available == true or wPct ~= nil
     local used = seat.used and string.format("%.0f", seat.used) or "—"
-    local lim = seat.monthly_limit and string.format("%.0f", seat.monthly_limit) or "—"
+    -- monthly_limit is effective pool (API or soft fallback); 0 is valid number in Lua.
+    local limNum = tonumber(seat.monthly_limit)
+    local lim = (limNum and limNum > 0) and string.format("%.0f", limNum) or "—"
     local wUsed = seat.weekly_used and string.format("%.0f", seat.weekly_used) or "—"
     local wLim = seat.weekly_limit and string.format("%.0f", seat.weekly_limit) or "—"
+    local wSrc = tostring(seat.weekly_source or "")
+    -- Linear estimates are soft (no official weekly pool). Prefer monthly as primary.
+    local wIsEstimate = (wSrc == "linear_period_estimate" or wSrc == "billing_snapshot_pending")
+    -- API monthlyLimit=0 → collector soft-fills from history/default; badge 軟估.
+    local softLimit = seat.limit_missing == true
+      or seat.limit_source == "history_last_nonzero"
+      or seat.limit_source == "plan_default"
+    local limitSrc = tostring(seat.limit_source or "")
     local falseAvail = seat.false_available == true
       or (seat.chat_gate == "blocked" and seat.effective_available == false
-          and seat.status_label == "帳務鎖")
+          and (seat.status_label == "帳務鎖" or tostring(seat.status_label or ""):find("帳務鎖", 1, true)))
     local billingExhausted = seat.chat_gate == "billing_exhausted"
       or seat.status_label == "額度盡"
+    local stale = seat.stale == true
+    local monthTag = softLimit and "月估" or "月"
     local main
     if not seat.ok then
       main = "離線"
     elseif falseAvail then
-      main = "帳務鎖 · 假有額 · 月 " .. pctText(seat.used_pct)
+      -- Monthly first: G1 was unreadable when "假有額" buried the real % 
+      main = "帳務鎖 · " .. monthTag .. " " .. pctText(seat.used_pct)
     elseif billingExhausted then
-      main = "額度盡 · 月 " .. pctText(seat.used_pct)
+      main = "額度盡 · " .. monthTag .. " " .. pctText(seat.used_pct)
+    elseif softLimit and wAvail then
+      main = pctText(seat.used_pct) .. " · 月估 · 週估 " .. pctText(wPct)
+    elseif softLimit then
+      main = pctText(seat.used_pct) .. " · 月估"
+    elseif wAvail and wIsEstimate then
+      -- G2 bug: week-est hit 100% while monthly 24% — lead with monthly
+      main = pctText(seat.used_pct) .. " · 月 · 週估 " .. pctText(wPct)
     elseif wAvail then
       main = pctText(wPct) .. " · 週 · 月 " .. pctText(seat.used_pct)
     else
       main = pctText(seat.used_pct) .. " · 月 credits"
+    end
+    if stale and seat.ok then
+      main = main .. " · 快取"
+    end
+    local softNote = ""
+    if softLimit then
+      local srcLabel = "軟估"
+      if limitSrc == "history_last_nonzero" then
+        srcLabel = "軟估·歷史上限"
+      elseif limitSrc == "plan_default" then
+        srcLabel = "軟估·方案預設"
+      end
+      softNote = "（" .. srcLabel .. "，API 未回月上限）"
     end
     local sub
     if not seat.ok then
       sub = seat.error or "請先 grok login"
     elseif falseAvail then
       local reason = seat.block_code or "spending-limit"
-      local msg = seat.block_message or "billing 有額但 chat 被擋"
-      -- keep sub one line; prefer code + monthly numbers
       sub = string.format(
-        "⚠ %s · 月 %s/%s 仍顯示有額 · %s",
-        tostring(reason), used, lim, tostring(msg):sub(1, 80)
+        "月 %s/%s%s · chat 被擋（%s）· billing 仍顯示有額",
+        used, lim, softNote, tostring(reason)
       )
     elseif billingExhausted then
-      sub = string.format("月 credits %s / %s 已用盡", used, lim)
+      sub = string.format("月 credits %s / %s 已用盡%s", used, lim, softNote)
+    elseif softLimit and wAvail then
+      sub = string.format(
+        "月 %s/%s%s · 週估 %s/%s · 重置 %s",
+        used, lim, softNote, wUsed, wLim, fmtIsoReset(seat.weekly_reset_at)
+      )
+    elseif wAvail and wIsEstimate then
+      sub = string.format(
+        "月 %s/%s · 週估 %s/%s（軟上限，非官方硬鎖）· 重置 %s",
+        used, lim, wUsed, wLim, fmtIsoReset(seat.weekly_reset_at)
+      )
     elseif wAvail then
       local srcNote = ""
       if seat.weekly_source == "billing_snapshot_delta" then
         srcNote = " · 週=快照增量"
-      elseif seat.weekly_source == "billing_snapshot_pending" then
-        srcNote = " · 週快照累積中"
       elseif seat.weekly_source == "api" then
         srcNote = " · 週=官方"
       end
       sub = string.format(
-        "週 %s/%s · 重置 %s · 月 %s/%s%s",
+        "週 %s/%s · 重置 %s · 月 %s/%s%s%s",
         wUsed, wLim, fmtIsoReset(seat.weekly_reset_at),
-        used, lim, srcNote
+        used, lim, softNote, srcNote
       )
     else
-      sub = string.format("月 credits %s / %s · %s → %s",
-        used, lim,
+      sub = string.format("月 credits %s / %s%s · %s → %s",
+        used, lim, softNote,
         tostring(seat.period_start or ""):sub(1, 10),
         tostring(seat.period_end or ""):sub(1, 10))
     end
-    local bars = {}
-    if seat.ok and wAvail and not falseAvail then
-      table.insert(bars, { label = "本週 credits（估）", pct = wPct })
+    if stale and seat.stale_error then
+      sub = sub .. " · 上次抓取失敗：" .. tostring(seat.stale_error):sub(1, 40)
     end
-    if seat.ok then table.insert(bars, { label = "月 credits", pct = seat.used_pct }) end
+    local bars = {}
+    -- Monthly first (authoritative for SuperGrok CLI). Weekly estimate second.
+    if seat.ok then
+      local mLabel = softLimit and "月 credits（軟估）" or "月 credits"
+      table.insert(bars, { label = mLabel, pct = seat.used_pct })
+    end
+    if seat.ok and wAvail and not falseAvail then
+      local wLabel = (wIsEstimate or softLimit) and "本週 credits（軟估）" or "本週 credits"
+      table.insert(bars, { label = wLabel, pct = wPct })
+    end
     local badge
     if not seat.ok then
       badge = "離線"
@@ -2027,6 +2087,10 @@ buildHTML = function(s)
       badge = "帳務鎖"
     elseif billingExhausted then
       badge = "額度盡"
+    elseif softLimit then
+      badge = "軟估"
+    elseif stale then
+      badge = "快取"
     else
       badge = seat.price or "SuperGrok"
     end
@@ -2047,6 +2111,7 @@ buildHTML = function(s)
         or (n == 1 and "#BF5AF2" or (n == 2 and "#A855F7" or "#9333EA"))
       table.insert(gkSeatCards, rowHTML({
         id = "grok-g" .. n,
+        sheet_id = "grok",
         name = "G" .. n .. " " .. esc(emailShort),
         badge = disp.badge,
         accent = accent,
@@ -2070,11 +2135,18 @@ buildHTML = function(s)
             or pctText(seat.weekly_used_pct),
           reset = fmtIsoReset(seat.weekly_reset_at),
         })
+        local monthUsage
+        if seat.used and seat.monthly_limit and tonumber(seat.monthly_limit) and tonumber(seat.monthly_limit) > 0 then
+          monthUsage = string.format("%.0f / %.0f", seat.used, seat.monthly_limit) .. " · " .. pctText(seat.used_pct)
+          if seat.limit_missing == true then
+            monthUsage = monthUsage .. " · 軟估"
+          end
+        else
+          monthUsage = pctText(seat.used_pct)
+        end
         table.insert(gkSeatSheetRows, {
           label = "G" .. n .. " 月額",
-          usage = (seat.used and seat.monthly_limit)
-            and (string.format("%.0f / %.0f", seat.used, seat.monthly_limit) .. " · " .. pctText(seat.used_pct))
-            or pctText(seat.used_pct),
+          usage = monthUsage,
           reset = fmtIsoReset(seat.period_end),
         })
       else
@@ -2140,42 +2212,174 @@ buildHTML = function(s)
     topMemHint
   )
 
-  local ag = s.antigravity or {}
-  local agMain = "離線"
-  local agSub = ag.error or "啟動 agy / Antigravity CLI 後顯示"
-  local agBars = {}
-  if ag.ok then
-    local agStale = ag.stale == true
-    agMain = pctText(ag.used_pct or ag.session_used_pct)
-      .. (agStale and " · 快取" or " · 最緊模型窗")
-    agSub = string.format(
-      "%s%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
-      tostring(ag.plan or "—"),
-      agStale and " · 上次連線" or "",
-      tostring(ag.prompt_credits_available or "—"),
-      tostring(ag.prompt_credits_monthly or "—"),
-      tostring(ag.flow_credits_available or "—"),
-      tostring(ag.flow_credits_monthly or "—"),
-      tostring(ag.next_reset or "—"):sub(1, 16)
-    )
-    agBars = {
-      { label = "Session（最緊模型）", pct = ag.used_pct or ag.session_used_pct },
-    }
-    local models = ag.models or {}
-    local scored = {}
-    for _, m in ipairs(models) do
-      if type(m) == "table" and m.used_pct ~= nil then
-        table.insert(scored, m)
+  -- Antigravity: multi-seat support (A0/A1/A2...). Build per-seat display data.
+  -- Legacy single-seat ag is fallback when no agy_seats data.
+  local agSeats = s.agy_seats or {}
+  local agSeatCards = {}
+  local agSeatSheetRows = {}
+
+  -- Helper: build display data for one agy seat
+  local function buildAgySeatData(seat)
+    local usedPct = seat.used_pct or seat.session_used_pct
+    local stale = seat.stale == true
+    local main
+    if not seat.ok then
+      main = "離線"
+    else
+      main = pctText(usedPct) .. " · 最緊模型窗"
+      if stale then main = main .. " · 快取" end
+    end
+    local sub
+    if not seat.ok then
+      sub = seat.error or "啟動 agy / Antigravity CLI 後顯示"
+    else
+      sub = string.format(
+        "%s%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
+        tostring(seat.plan or "—"),
+        stale and " · 上次連線" or "",
+        tostring(seat.prompt_credits_available or "—"),
+        tostring(seat.prompt_credits_monthly or "—"),
+        tostring(seat.flow_credits_available or "—"),
+        tostring(seat.flow_credits_monthly or "—"),
+        tostring(seat.next_reset or "—"):sub(1, 16)
+      )
+    end
+    local bars = {}
+    if seat.ok then
+      table.insert(bars, { label = "Session（最緊模型）", pct = usedPct })
+      local models = seat.models or {}
+      local scored = {}
+      for _, m in ipairs(models) do
+        if type(m) == "table" and m.used_pct ~= nil then
+          table.insert(scored, m)
+        end
+      end
+      table.sort(scored, function(a, b)
+        return (a.used_pct or 0) > (b.used_pct or 0)
+      end)
+      for i = 1, math.min(3, #scored) do
+        table.insert(bars, {
+          label = tostring(scored[i].label or "model"),
+          pct = scored[i].used_pct,
+        })
       end
     end
-    table.sort(scored, function(a, b)
-      return (a.used_pct or 0) > (b.used_pct or 0)
-    end)
-    for i = 1, math.min(3, #scored) do
-      table.insert(agBars, {
-        label = tostring(scored[i].label or "model"),
-        pct = scored[i].used_pct,
+    local badge
+    if not seat.ok then
+      badge = "離線"
+    elseif stale then
+      badge = "快取"
+    else
+      badge = seat.plan or "CLI"
+    end
+    return { main = main, sub = sub, bars = bars, badge = badge }
+  end
+
+  -- Build per-seat cards and sheet rows
+  for _, seat in ipairs(agSeats) do
+    if type(seat) == "table" then
+      local n = seat.seat or 0
+      local emailShort = tostring(seat.email or "?"):match("^([^@]+)") or "?"
+      local disp = buildAgySeatData(seat)
+      -- Accent: Google blue shades per seat
+      local accent = (n == 0 and "#4285F4" or (n == 1 and "#1A73E8" or (n == 2 and "#1967D2" or "#185ABC")))
+      table.insert(agSeatCards, rowHTML({
+        id = "agy-a" .. n,
+        sheet_id = "antigravity",
+        name = "A" .. n .. " " .. emailShort,
+        badge = disp.badge,
+        accent = accent,
+        main = disp.main,
+        sub = disp.sub,
+        bars = disp.bars,
+      }))
+      -- Sheet detail rows
+      if seat.ok then
+        local usedPct = seat.used_pct or seat.session_used_pct
+        table.insert(agSeatSheetRows, {
+          label = "A" .. n .. " Session",
+          usage = pctText(usedPct),
+          reset = fmtIsoReset(seat.next_reset),
+        })
+        for mi, model in ipairs(seat.models or {}) do
+          if mi > 4 then break end
+          table.insert(agSeatSheetRows, {
+            label = "A" .. n .. " " .. tostring(model.label or "model"):sub(1, 20),
+            usage = pctText(model.used_pct),
+            reset = fmtIsoReset(model.reset_time),
+          })
+        end
+      else
+        table.insert(agSeatSheetRows, {
+          label = "A" .. n,
+          usage = seat.error or "離線",
+          reset = "—",
+        })
+      end
+    end
+  end
+
+  -- Fallback: if no agy_seats data, use legacy single-seat ag
+  if #agSeatCards == 0 then
+    local agMain, agSub, agBars
+    if ag.ok then
+      local agStale = ag.stale == true
+      agMain = pctText(ag.used_pct or ag.session_used_pct)
+        .. (agStale and " · 快取" or " · 最緊模型窗")
+      agSub = string.format(
+        "%s%s · Prompt %s/%s · Flow %s/%s · 重置 %s",
+        tostring(ag.plan or "—"),
+        agStale and " · 上次連線" or "",
+        tostring(ag.prompt_credits_available or "—"),
+        tostring(ag.prompt_credits_monthly or "—"),
+        tostring(ag.flow_credits_available or "—"),
+        tostring(ag.flow_credits_monthly or "—"),
+        tostring(ag.next_reset or "—"):sub(1, 16)
+      )
+      agBars = {
+        { label = "Session（最緊模型）", pct = ag.used_pct or ag.session_used_pct },
+      }
+      local models = ag.models or {}
+      local scored = {}
+      for _, m in ipairs(models) do
+        if type(m) == "table" and m.used_pct ~= nil then
+          table.insert(scored, m)
+        end
+      end
+      table.sort(scored, function(a, b)
+        return (a.used_pct or 0) > (b.used_pct or 0)
+      end)
+      for i = 1, math.min(3, #scored) do
+        table.insert(agBars, {
+          label = tostring(scored[i].label or "model"),
+          pct = scored[i].used_pct,
+        })
+      end
+    else
+      agMain = "離線"
+      agSub = ag.error or "啟動 agy / Antigravity CLI 後顯示"
+      agBars = {}
+    end
+    table.insert(agSeatCards, rowHTML({
+      id = "antigravity",
+      name = "Antigravity",
+      badge = ag.ok and tostring(ag.plan or "CLI") or "CLI",
+      accent = "#4285F4",
+      main = agMain,
+      sub = agSub,
+      bars = agBars,
+    }))
+    agSeatSheetRows = {}
+    for index, model in ipairs(ag.models or {}) do
+      if index > 8 then break end
+      table.insert(agSeatSheetRows, {
+        label = tostring(model.label or "Antigravity model"),
+        usage = pctText(model.used_pct),
+        reset = fmtIsoReset(model.reset_time),
       })
+    end
+    if #agSeatSheetRows == 0 and ag.next_reset then
+      table.insert(agSeatSheetRows, { label = "最緊模型視窗", usage = pctText(ag.used_pct), reset = fmtIsoReset(ag.next_reset) })
     end
   end
 
@@ -2214,15 +2418,7 @@ buildHTML = function(s)
       bars = goBars,
     }),
     grok = table.concat(gkSeatCards, "\n"),
-    antigravity = rowHTML({
-      id = "antigravity",
-      name = "Antigravity",
-      badge = ag.ok and tostring(ag.plan or "CLI") or "CLI",
-      accent = "#4285F4",
-      main = agMain,
-      sub = agSub,
-      bars = agBars,
-    }),
+    antigravity = table.concat(agSeatCards, "\n"),
     mac = rowHTML({
       id = "mac",
       name = "Mac",
@@ -2343,18 +2539,6 @@ buildHTML = function(s)
     orderedSections = orderedSections .. (sections[id] or "")
   end
   local goResetAt = type(go.resets_in_sec) == "number" and (os.time() + go.resets_in_sec) or nil
-  local agRows = {}
-  for index, model in ipairs(ag.models or {}) do
-    if index > 8 then break end
-    table.insert(agRows, {
-      label = tostring(model.label or "Antigravity model"),
-      usage = pctText(model.used_pct),
-      reset = fmtIsoReset(model.reset_time),
-    })
-  end
-  if #agRows == 0 and ag.next_reset then
-    table.insert(agRows, { label = "最緊模型視窗", usage = pctText(ag.used_pct), reset = fmtIsoReset(ag.next_reset) })
-  end
   local providerSheets = providerUsageSheetHTML("claude", "Claude Usage", "5 小時與 7 日訂閱額度", {
       { label = "5 小時視窗", usage = pctText(cl.five_hour_pct), reset = fmtResetFull(cl.five_hour_resets_at) },
       { label = "7 日視窗", usage = pctText(cl.seven_day_pct), reset = fmtResetFull(cl.seven_day_resets_at) },
@@ -2370,7 +2554,10 @@ buildHTML = function(s)
       "G1/G2/G3 週額度 + 月 credits（週=官方或本機 billing 快照估）",
       gkSeatSheetRows,
       gk.source or gk.weekly_note)
-    .. providerUsageSheetHTML("antigravity", "Antigravity Usage", "各模型視窗", agRows, ag.source)
+    .. providerUsageSheetHTML("antigravity", "Antigravity Usage · 多帳號",
+      "A0/A1/A2 各帳號模型視窗額度",
+      agSeatSheetRows,
+      ag.source)
     .. macHostSheetHTML(host)
   local detailSheets = tokenLedgerDetailHTML(s) .. computeCapacityDetailHTML(s)
     .. providerSheets .. layoutReorderSheetHTML()
@@ -4261,13 +4448,27 @@ function M.refreshTitleOnly()
   end
 
   local ag = s.antigravity or {}
+  -- Derive the best available AGY metric: prefer legacy single-seat,
+  -- fall back to the first active multi-seat entry.
+  local agOk = ag.ok
+  local agPct = ag.used_pct or ag.session_used_pct
+  if not agOk then
+    local seats = s.agy_seats or {}
+    for _, seat in ipairs(seats) do
+      if type(seat) == "table" and seat.ok then
+        agOk = true
+        agPct = seat.used_pct or seat.session_used_pct
+        break
+      end
+    end
+  end
   local parts = {
     chip("C", cl.ok, clMenuPct),
     chip("G", cx.ok, cxMenuPct),
     chip("K", gk.ok, gk.used_pct),
   }
-  if ag.ok then
-    table.insert(parts, chip("A", true, ag.used_pct or ag.session_used_pct))
+  if agOk then
+    table.insert(parts, chip("A", true, agPct))
   end
 
   -- Optional memory chip when swap is active or RAM is tight
@@ -4290,8 +4491,8 @@ function M.refreshTitleOnly()
     short(cx.ok, cxMenuPct),
     short(gk.ok, gk.used_pct)
   )
-  if ag.ok then
-    body = body .. " A" .. short(true, ag.used_pct or ag.session_used_pct)
+  if agOk then
+    body = body .. " A" .. short(true, agPct)
   end
   if showMem and mem ~= nil then
     body = body .. " M" .. tostring(mem)
@@ -4322,7 +4523,7 @@ function M.refreshTitleOnly()
     and string.format("%.1f GB", swap / 1024)
     or string.format("%.0f MB", swap)
   local tip = string.format(
-    "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %s\nAI 額度雷達 %d · %s\nC = Claude %s %s\nG = Codex %s %s\n%s\nA = Antigravity %s (%s)\nOpenCode Go %s\n點一下開啟完整面板",
+    "NexStatus\nH = 電腦壓力 %d%% · %s · CPU %s · MEM %s · Swap %s\nAI 額度雷達 %d · %s\nC = Claude %s %s\nG = Codex %s %s\n%s\n%s\nOpenCode Go %s\n點一下開啟完整面板",
     hostLoad,
     tostring(host.pressure or "—"):gsub(" 🟢", ""):gsub(" 🟡", ""):gsub(" 🔴", ""),
     pctText(host.cpu_pct),
@@ -4352,8 +4553,24 @@ function M.refreshTitleOnly()
       end
       return table.concat(gkLines, "\n")
     end)(),
-    pctText(ag.used_pct or ag.session_used_pct),
-    tostring(ag.plan or "—"),
+    -- Multi-seat Antigravity tooltip
+    (function()
+      local agLines = {}
+      local seats = s.agy_seats or {}
+      if #seats > 0 then
+        for _, seat in ipairs(seats) do
+          if type(seat) == "table" then
+            local n = seat.seat or 0
+            local emailShort = tostring(seat.email or "?"):match("^([^@]+)") or "?"
+            table.insert(agLines, string.format("A%d = %s %s", n, emailShort, pctText(seat.used_pct or seat.session_used_pct)))
+          end
+        end
+      end
+      if #agLines == 0 then
+        return "A = Antigravity " .. pctText(ag.used_pct or ag.session_used_pct) .. " (" .. tostring(ag.plan or "—") .. ")"
+      end
+      return table.concat(agLines, "\n")
+    end)(),
     pctText(go.used_pct)
   )
 

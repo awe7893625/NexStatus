@@ -93,6 +93,14 @@ class HammerspoonUIContractTests(unittest.TestCase):
         self.assertIn("假有額", self.source)
         self.assertIn("buildGrokSeatData", self.source)
 
+    def test_grok_soft_limit_badge_when_api_omits_monthly_pool(self) -> None:
+        """When API monthlyLimit=0, UI must badge 軟估 / 月估 (not blank —)."""
+        self.assertIn("limit_missing", self.source)
+        self.assertIn("limit_source", self.source)
+        self.assertIn("軟估", self.source)
+        self.assertIn("月估", self.source)
+        self.assertIn("月 credits（軟估）", self.source)
+
     def test_mac_card_opens_host_resource_sheet_with_process_lists(self) -> None:
         self.assertIn("macHostSheetHTML", self.source)
         self.assertIn('id="usage-mac-sheet"', self.source)
