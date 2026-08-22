@@ -2268,7 +2268,10 @@ buildHTML = function(s)
     return rowHTML({
       id = id,
       name = "OpenRouter · " .. tostring(seatName),
-      badge = seat.label or "OpenRouter",
+      -- badge 在本檔的語意是「狀態」（離線／帳務鎖／額度盡／軟估），不是身分。
+      -- 原本掛 seat.label（金鑰指紋 sk-or-v1-cef...1b7）佔掉一整塊卻沒有可操作資訊，
+      -- 而 name 已經寫了「OpenRouter · dsh」足以識別席位。2026-08-23 Rain 指正後移除。
+      badge = (seat.ok ~= true) and "離線" or nil,
       accent = lowBalance and "#FF453A" or "#0A84FF",
       main = main,
       sub = sub,
