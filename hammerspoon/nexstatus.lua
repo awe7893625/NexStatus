@@ -2221,14 +2221,24 @@ buildHTML = function(s)
     local remainingPct = accountCredits and accountCredits > 0 and accountRemaining
       and (accountRemaining * 100 / accountCredits) or nil
     local lowBalance = remainingPct ~= nil and remainingPct < 20
+    -- Main row priority: this key's own $ limit remaining (e.g. M5 key = $20 cap)
+    -- takes precedence over the shared account balance, since that is what
+    -- actually gates this seat. Falls back to account_remaining when the key
+    -- has no per-key limit (e.g. global/hermes seat).
+    local keyLimitRemaining = tonumber(seat.key_limit_remaining)
+    local mainRemaining
+    if keyLimitRemaining ~= nil then
+      mainRemaining = money(keyLimitRemaining)
+    elseif accountRemaining ~= nil then
+      mainRemaining = money(accountRemaining)
+    else
+      mainRemaining = "餘額未知"
+    end
     local main
     if seat.ok ~= true then
       main = "離線"
-    elseif accountRemaining ~= nil and seat.used_pct ~= nil then
-      main = (lowBalance and "⚠ " or "") .. money(accountRemaining)
-        .. " 剩餘 · 已用 " .. pctText(seat.used_pct)
     else
-      main = "餘額未知 · 已用 " .. pctText(seat.used_pct)
+      main = (lowBalance and "⚠ " or "") .. mainRemaining .. " 剩餘"
     end
     local keyUsage = money(seat.key_usage_monthly)
     local keyLimit = money(seat.key_limit)
@@ -2236,7 +2246,8 @@ buildHTML = function(s)
     if seat.ok ~= true then
       sub = seat.error or "尚無 OpenRouter key"
     else
-      sub = "key 月 " .. keyUsage .. " / " .. keyLimit
+      sub = "已用 " .. pctText(seat.used_pct)
+        .. " · key 月 " .. keyUsage .. " / " .. keyLimit
         .. " · 今日 " .. deltaMoney(seat.delta_today)
         .. " · 近 7 日 " .. deltaMoney(seat.delta_7d)
       if lowBalance then sub = "⚠ 帳號餘額低於 20% · " .. sub end
