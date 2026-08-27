@@ -2213,6 +2213,7 @@ buildHTML = function(s)
     if n < 0 then return string.format("−$%.2f", math.abs(n)) end
     return string.format("+$%.2f", n)
   end
+  local OPENROUTER_SEAT_LABELS = { m5 = "M5 team", global = "hermes" }
   local function buildOpenRouterSeat(seatName, seat)
     seat = type(seat) == "table" and seat or { ok = false, error = "尚無資料" }
     local accountCredits = tonumber(seat.account_credits)
@@ -2260,17 +2261,17 @@ buildHTML = function(s)
     local id = "openrouter-" .. tostring(seatName)
     openrouterSheets = openrouterSheets .. providerUsageSheetHTML(
       id,
-      "OpenRouter · " .. tostring(seatName),
+      "OpenRouter · " .. (OPENROUTER_SEAT_LABELS[seatName] or seatName),
       "帳號 credits 與此 key 的月用量",
       rows,
       "OpenRouter credits + key"
     )
     return rowHTML({
       id = id,
-      name = "OpenRouter · " .. tostring(seatName),
+      name = "OpenRouter · " .. (OPENROUTER_SEAT_LABELS[seatName] or seatName),
       -- badge 在本檔的語意是「狀態」（離線／帳務鎖／額度盡／軟估），不是身分。
       -- 原本掛 seat.label（金鑰指紋 sk-or-v1-cef...1b7）佔掉一整塊卻沒有可操作資訊，
-      -- 而 name 已經寫了「OpenRouter · dsh」足以識別席位。2026-08-23 Rain 指正後移除。
+      -- 而 name 已經寫了「OpenRouter · M5 team」足以識別席位。2026-08-23 Rain 指正後移除。
       badge = (seat.ok ~= true) and "離線" or nil,
       accent = lowBalance and "#FF453A" or "#0A84FF",
       main = main,
@@ -2278,7 +2279,7 @@ buildHTML = function(s)
       bars = seat.ok == true and {{ label = "帳號已用", pct = seat.used_pct }} or {},
     })
   end
-  for _, seatName in ipairs({ "dsh", "global" }) do
+  for _, seatName in ipairs({ "m5", "global" }) do
     table.insert(openrouterSeatCards, buildOpenRouterSeat(seatName, openrouter[seatName]))
   end
 

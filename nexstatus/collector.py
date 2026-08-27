@@ -116,10 +116,10 @@ AGY_PATH_MARKERS = (
     "/bin/agy",
     "agy-node",
 )
-OPENROUTER_DSH_ENV = Path(os.path.expanduser("~/.dsh/.env"))
+OPENROUTER_M5_ENV = Path(os.path.expanduser("~/.credentials/m5_openrouter.env"))
 OPENROUTER_GLOBAL_ENV = Path(os.path.expanduser("~/.hermes/credentials.d/openrouter"))
 OPENROUTER_SEATS = (
-    {"seat": "dsh", "path": OPENROUTER_DSH_ENV, "variable": "DEEPSEEK_API_KEY"},
+    {"seat": "m5", "path": OPENROUTER_M5_ENV, "variable": "OPENROUTER_API_KEY_M5"},
     {"seat": "global", "path": OPENROUTER_GLOBAL_ENV, "variable": "OPENROUTER_API_KEY"},
 )
 KNOWN_CACHE_FILES = (

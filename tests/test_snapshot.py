@@ -488,9 +488,9 @@ class SnapshotContractTests(unittest.TestCase):
                 ],
             ):
                 null_limit = collector.openrouter_usage(force=True)
-            self.assertTrue(null_limit["dsh"]["ok"])
-            self.assertIsNone(null_limit["dsh"]["key_limit"])
-            self.assertIsNone(null_limit["dsh"]["key_limit_remaining"])
+            self.assertTrue(null_limit["m5"]["ok"])
+            self.assertIsNone(null_limit["m5"]["key_limit"])
+            self.assertIsNone(null_limit["m5"]["key_limit_remaining"])
 
     def test_build_snapshot_passes_shared_deadline_to_openrouter(self) -> None:
         patches = self.base_patches()[:-1]
