@@ -1708,6 +1708,7 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
     resets_in_sec = None
     used_pct: int | None = None
     http_code = None
+    human_error = None
 
     try:
         with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=20) as resp:
@@ -1761,10 +1762,33 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
                     pass
         else:
             live_status = "error"
-            message = f"HTTP {e.code}"
+            try:
+                err = json.loads(text)
+            except json.JSONDecodeError:
+                err = None
+            nested_error = err.get("error") if isinstance(err, dict) else None
+            if not isinstance(nested_error, dict):
+                nested_error = {}
+            error_type = err.get("type") if isinstance(err, dict) else None
+            if not isinstance(error_type, str):
+                error_type = nested_error.get("type")
+            raw_message = err.get("message") if isinstance(err, dict) else None
+            if not isinstance(raw_message, str):
+                raw_message = nested_error.get("message")
+            if not isinstance(raw_message, str) or not raw_message:
+                raw_message = text.strip() if err is not None else None
+            message = raw_message or f"HTTP {e.code}"
+            if e.code == 401:
+                if error_type == "CreditsError" or "insufficient balance" in message.lower():
+                    human_error = "OpenCode Go 餘額不足，需儲值"
+                else:
+                    human_error = "OpenCode Go key 無效"
+            else:
+                human_error = f"OpenCode Go API 錯誤 HTTP {e.code}"
     except Exception as e:  # noqa: BLE001
         live_status = "error"
         message = _safe_error(e)
+        human_error = "OpenCode Go 連線失敗（離線或逾時）"
 
     result = {
         "ok": live_status in ("ok", "capped"),
@@ -1774,6 +1798,7 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
         "limit_name": limit_name,
         "used_pct": used_pct,
         "message": message,
+        "error": human_error,
         "resets_in_sec": resets_in_sec,
         "http_code": http_code,
         "caps": caps,

@@ -79,13 +79,71 @@ class SnapshotContractTests(unittest.TestCase):
             hdrs=None,
             fp=None,
         )
-        err.read = lambda: body  # type: ignore[method-assign]
+        err.read = lambda *_args: body  # type: ignore[method-assign]
 
         with mock.patch.object(urllib.request, "urlopen", side_effect=err):
             gate = collector._grok_chat_gate("tok-test")
         self.assertEqual(gate["chat_gate"], "blocked")
         self.assertIs(gate["chat_ok"], False)
         self.assertIn("spending-limit", gate["block_code"] or "")
+
+    def test_opencode_go_usage_classifies_insufficient_balance(self) -> None:
+        body = json.dumps({
+            "type": "CreditsError",
+            "message": "Insufficient balance, please add credits at https://opencode.ai/...",
+        }).encode()
+        err = urllib.error.HTTPError(
+            url=collector.GO_CHAT_URL,
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        err.read = lambda *_args: body  # type: ignore[method-assign]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            go = cache / "opencode-go.json"
+            with mock.patch.object(collector, "_opencode_key", return_value="fake-key"), mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                GO_CACHE=go,
+                KNOWN_CACHE_FILES=(go,),
+            ), mock.patch.object(urllib.request, "urlopen", side_effect=err):
+                result = collector.opencode_go_usage(force=True)
+
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["live_status"], "error")
+        self.assertIn("餘額不足", result["error"])
+
+    def test_opencode_go_usage_classifies_invalid_key(self) -> None:
+        body = json.dumps({
+            "type": "AuthenticationError",
+            "message": "Invalid API key",
+        }).encode()
+        err = urllib.error.HTTPError(
+            url=collector.GO_CHAT_URL,
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        err.read = lambda: body  # type: ignore[method-assign]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            go = cache / "opencode-go.json"
+            with mock.patch.object(collector, "_opencode_key", return_value="fake-key"), mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                GO_CACHE=go,
+                KNOWN_CACHE_FILES=(go,),
+            ), mock.patch.object(urllib.request, "urlopen", side_effect=err):
+                result = collector.opencode_go_usage(force=True)
+
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["live_status"], "error")
+        self.assertIn("key 無效", result["error"])
 
     def test_annotate_flags_false_available_when_billing_has_room(self) -> None:
         """Billing 0/15000 + chat blocked → 帳務鎖 / false_available."""

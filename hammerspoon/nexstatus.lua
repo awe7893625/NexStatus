@@ -1962,7 +1962,7 @@ buildHTML = function(s)
     }
   else
     goMain = "離線"
-    goSub = go.error or "尚無 OpenCode Go key"
+    goSub = go.error or go.message or "尚無 OpenCode Go key"
     goBars = {}
   end
 
