@@ -733,7 +733,7 @@ end
 
 local esc
 
-local function providerUsageSheetHTML(id, title, subtitle, rows, source)
+local function providerUsageSheetHTML(id, title, subtitle, rows, source, stale)
   local body = ""
   for _, row in ipairs(rows or {}) do
     body = body .. string.format([[
@@ -744,6 +744,10 @@ local function providerUsageSheetHTML(id, title, subtitle, rows, source)
     ]], esc(row.label or "額度視窗"), esc(row.usage or "—"), esc(row.reset or "日期未知"))
   end
   if body == "" then body = '<div class="detail-empty">目前沒有可靠的重置日期；NexStatus 不會猜測。</div>' end
+  local subtitleWithStale = subtitle or "額度視窗與重置時間"
+  if stale == true then
+    subtitleWithStale = subtitleWithStale .. " · 快取"
+  end
   return string.format([[
     <div class="sheet-backdrop" data-sheet-close="usage-%s" aria-hidden="true"></div>
     <section class="detail-sheet usage-sheet" id="usage-%s-sheet" role="dialog" aria-modal="true"
@@ -759,7 +763,7 @@ local function providerUsageSheetHTML(id, title, subtitle, rows, source)
       </div>
     </section>
   ]], esc(id), esc(id), esc(id), esc(id), esc(title), esc(id), esc(title),
-    esc(subtitle or "額度視窗與重置時間"), body, esc(source or "unknown"))
+    esc(subtitleWithStale), body, esc(source or "unknown"))
 end
 
 local function hostProcessRowsHTML(title, rows, mode)
@@ -1907,13 +1911,20 @@ buildHTML = function(s)
 
   local clPct, clWin = primaryQuota(cl)
   local clMain = cl.ok and (clPct ~= nil and (pctText(clPct) .. " · " .. clWin) or "無資料") or "離線"
+  local claudeStale = cl.stale == true
   local clSub
   if not cl.ok then
     clSub = cl.error or "尚無 Claude usage 資料"
   elseif cl.five_hour_pct ~= nil then
     clSub = string.format("7 日 %s · 重置 %s", pctText(cl.seven_day_pct), fmtReset(cl.seven_day_resets_at))
+    if claudeStale and cl.seven_day_resets_at ~= nil then
+      clSub = clSub .. " · 快取"
+    end
   elseif cl.seven_day_pct ~= nil then
     clSub = string.format("5h 無回報 · 重置 %s", fmtReset(cl.seven_day_resets_at))
+    if claudeStale and cl.seven_day_resets_at ~= nil then
+      clSub = clSub .. " · 快取"
+    end
   else
     clSub = "尚無 Claude usage 資料"
   end
@@ -2638,7 +2649,7 @@ buildHTML = function(s)
   local providerSheets = providerUsageSheetHTML("claude", "Claude Usage", "5 小時與 7 日訂閱額度", {
       { label = "5 小時視窗", usage = pctText(cl.five_hour_pct), reset = fmtResetFull(cl.five_hour_resets_at) },
       { label = "7 日視窗", usage = pctText(cl.seven_day_pct), reset = fmtResetFull(cl.seven_day_resets_at) },
-    }, cl.source)
+    }, cl.source, cl.stale)
     .. providerUsageSheetHTML("codex", "Codex Usage", tostring(cx.plan_type or "plan") .. " 訂閱額度", {
       { label = "5 小時視窗", usage = pctText(cx.five_hour_pct), reset = fmtResetFull(cx.five_hour_resets_at) },
       { label = "7 日視窗", usage = pctText(cx.seven_day_pct), reset = fmtResetFull(cx.seven_day_resets_at) },

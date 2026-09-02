@@ -85,6 +85,8 @@ GO_TTL_OK = 5 * 60
 GO_TTL_CAPPED = 15 * 60  # when already at limit, probe less often
 CLAUDE_FRESH_TTL = 90  # recent sanitized status/cache freshness window
 CLAUDE_TTL = 6 * 60 * 60  # last-known-good quota when statusLine omits rate_limits
+CLAUDE_FIVE_HOUR_WINDOW_SEC = 5 * 60 * 60  # 18000 — source data older than this cannot trust 5h reset time
+CLAUDE_SEVEN_DAY_WINDOW_SEC = 7 * 24 * 60 * 60  # 604800 — source data older than this cannot trust 7d reset time
 # Official OpenCode Go caps (https://opencode.ai/docs/go/#usage-limits)
 GO_CAP_5H_USD = 12.0
 GO_CAP_WEEK_USD = 30.0
@@ -265,10 +267,12 @@ def _claude_from_cache(max_age: float = CLAUDE_TTL) -> dict[str, Any] | None:
 def claude_usage() -> dict[str, Any]:
     data = None
     source = None
+    source_path = None
     for path in (CLAUDE_STATUS, CLAUDE_LEGACY, CLAUDE_TT):
         data = _read_json(path)
         if data:
             source = "claude-status"
+            source_path = path
             break
 
     model = None
@@ -283,6 +287,38 @@ def claude_usage() -> dict[str, Any]:
         seven_reset = seven.get("resets_at")
         five_pct = _pct(five.get("used_percentage", five.get("used_percent", five.get("utilization"))))
         seven_pct = _pct(seven.get("used_percentage", seven.get("used_percent", seven.get("utilization"))))
+
+        # Check source file mtime to determine staleness per window.
+        # If source file is too old, the reset times for that window cannot be trusted.
+        source_mtime = None
+        if source_path:
+            try:
+                source_mtime = source_path.stat().st_mtime
+            except OSError:
+                # If we can't read mtime, treat data as unknown/stale for both windows.
+                source_mtime = None
+
+        # If source is too old for the 5h window, null out the 5h reset and percentage.
+        if source_mtime is not None:
+            source_age = now - source_mtime
+            if source_age > CLAUDE_FIVE_HOUR_WINDOW_SEC:
+                five_reset = None
+                five_pct = None
+            # If source is too old for the 7d window, null out the 7d reset and percentage.
+            if source_age > CLAUDE_SEVEN_DAY_WINDOW_SEC:
+                seven_reset = None
+                seven_pct = None
+        elif five.get("resets_at") is not None or seven.get("resets_at") is not None:
+            # Source file mtime is unknown/unreadable but data is present.
+            # Treat as unknown age — do not silently assume fresh per AGENTS.md data contract.
+            # Null both windows to be safe.
+            five_reset = None
+            five_pct = None
+            seven_reset = None
+            seven_pct = None
+
+        # After staleness check, apply the existing per-value logic:
+        # if reset epoch is in the past, zero the percentage.
         if isinstance(five_reset, (int, float)) and five_reset < now:
             five_pct = 0
         if isinstance(seven_reset, (int, float)) and seven_reset < now:
