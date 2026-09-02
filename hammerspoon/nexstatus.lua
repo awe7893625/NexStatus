@@ -33,7 +33,7 @@ local panelShown = false
 local buildHTML
 
 local HOME = os.getenv("HOME") or ""
-local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Developer/NexStatus")
+local ROOT = os.getenv("NEXSTATUS_HOME") or (HOME .. "/Projects/NexStatus")
 local SNAP = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. "/status.json"
 local NATIVE_MENUBAR_MARKER = (os.getenv("NEXSTATUS_CACHE") or (HOME .. "/.cache/nexstatus")) .. "/native-menubar.enabled"
 local PREFS_PATH = (os.getenv("NEXSTATUS_CONFIG") or (HOME .. "/.config/nexstatus")) .. "/prefs.json"
