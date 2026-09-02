@@ -291,6 +291,7 @@ def claude_usage() -> dict[str, Any]:
         # Check source file mtime to determine staleness per window.
         # If source file is too old, the reset times for that window cannot be trusted.
         source_mtime = None
+        mtime_stale = False
         if source_path:
             try:
                 source_mtime = source_path.stat().st_mtime
@@ -304,10 +305,12 @@ def claude_usage() -> dict[str, Any]:
             if source_age > CLAUDE_FIVE_HOUR_WINDOW_SEC:
                 five_reset = None
                 five_pct = None
+                mtime_stale = True
             # If source is too old for the 7d window, null out the 7d reset and percentage.
             if source_age > CLAUDE_SEVEN_DAY_WINDOW_SEC:
                 seven_reset = None
                 seven_pct = None
+                mtime_stale = True
         elif five.get("resets_at") is not None or seven.get("resets_at") is not None:
             # Source file mtime is unknown/unreadable but data is present.
             # Treat as unknown age — do not silently assume fresh per AGENTS.md data contract.
@@ -316,6 +319,7 @@ def claude_usage() -> dict[str, Any]:
             five_pct = None
             seven_reset = None
             seven_pct = None
+            mtime_stale = True
 
         # After staleness check, apply the existing per-value logic:
         # if reset epoch is in the past, zero the percentage.
@@ -337,7 +341,7 @@ def claude_usage() -> dict[str, Any]:
                 "seven_day_resets_at": seven_reset,
                 "model": model,
                 "updated_at": updated_at,
-                "stale": False,
+                "stale": mtime_stale,
                 "_fetched_at": datetime.now(timezone.utc).isoformat(),
                 "_fetched_at_ts": now,
             }

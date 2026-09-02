@@ -81,6 +81,8 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
             # 7-day window should still be present (4 days < 7 day threshold)
             self.assertIsNotNone(result.get("seven_day_resets_at"))
             self.assertEqual(result.get("seven_day_pct"), 30)
+            # result["stale"] should be True because mtime staleness was detected
+            self.assertTrue(result.get("stale"))
         finally:
             temp_file.unlink(missing_ok=True)
 
@@ -162,6 +164,8 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
             self.assertEqual(result.get("seven_day_pct"), 30)
             self.assertEqual(result.get("five_hour_resets_at"), reset_5h)
             self.assertEqual(result.get("seven_day_resets_at"), reset_7d)
+            # result["stale"] should be False because source file is fresh
+            self.assertFalse(result.get("stale"))
         finally:
             temp_file.unlink(missing_ok=True)
 
@@ -202,6 +206,52 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
             self.assertEqual(result.get("five_hour_pct"), 0)
             # 7d reset is still in future → percentage should be unchanged
             self.assertEqual(result.get("seven_day_pct"), 30)
+        finally:
+            temp_file.unlink(missing_ok=True)
+
+    def test_five_hour_window_exactly_at_threshold_still_trusted(self) -> None:
+        """Boundary test: source_age just below CLAUDE_FIVE_HOUR_WINDOW_SEC should be trusted.
+
+        The staleness check uses strict `>` comparison, so just-below-threshold means
+        the window is still within bounds and data should pass through.
+        """
+        reset_5h = int(time.time() + 2 * 3600)
+        reset_7d = int(time.time() + 3 * 86400)
+        temp_file = self._create_temp_claude_file(
+            {
+                "rate_limits": {
+                    "five_hour": {
+                        "used_percentage": 45.0,
+                        "resets_at": reset_5h,
+                    },
+                    "seven_day": {
+                        "used_percentage": 30.0,
+                        "resets_at": reset_7d,
+                    },
+                },
+            },
+            age_seconds=17999.0,  # Just below 18000 sec (CLAUDE_FIVE_HOUR_WINDOW_SEC)
+        )
+
+        try:
+            with mock.patch.object(
+                collector, "CLAUDE_STATUS", temp_file
+            ), mock.patch.object(
+                collector, "CLAUDE_LEGACY", Path("/nonexistent")
+            ), mock.patch.object(
+                collector, "CLAUDE_TT", Path("/nonexistent")
+            ):
+                result = collector.claude_usage()
+
+            self.assertTrue(result.get("ok"))
+            # At exactly the threshold, the window should still be trusted (> check, not >=)
+            self.assertEqual(result.get("five_hour_pct"), 45)
+            self.assertEqual(result.get("five_hour_resets_at"), reset_5h)
+            # 7-day window should also pass through (18000 sec < 604800 sec)
+            self.assertEqual(result.get("seven_day_pct"), 30)
+            self.assertEqual(result.get("seven_day_resets_at"), reset_7d)
+            # result["stale"] should be False because mtime is still within threshold
+            self.assertFalse(result.get("stale"))
         finally:
             temp_file.unlink(missing_ok=True)
 
