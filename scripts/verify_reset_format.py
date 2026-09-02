@@ -90,8 +90,11 @@ def main() -> int:
         fmt_reset_code = f"local function fmtReset(ts)\n{fmt_reset_match.group(1).strip()}\nend"
         fmt_reset_full_code = f"local function fmtResetFull(ts)\n{fmt_reset_full_match.group(1).strip()}\nend"
 
-    # Fixed "now" for testing: 2026-09-02 00:11:00 UTC (= 08:11 Taipei)
-    fixed_now_epoch = 1725206460
+    # Fixed "now" for testing: 2026-09-02 00:11:00 UTC (= 08:11 Taipei).
+    # (Previously hardcoded as 1725206460, which is 2024-09-01 -- a two-year
+    # miscalculation that silently broke every assertion below: the "now" used to
+    # stub os.time() must match the epoch in the comment, not just look plausible.)
+    fixed_now_epoch = 1788307860
 
     # BUG-1/BUG-2 stale values
     five_hour_reset_ts = 1788094800
