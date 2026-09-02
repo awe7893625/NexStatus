@@ -1706,10 +1706,16 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
         ttl = GO_TTL_CAPPED if cached.get("live_status") == "capped" else GO_TTL_OK
         if age < ttl:
             cached["local"] = local  # always refresh local numbers
-            # recompute soft pct from local if not capped
-            if cached.get("live_status") != "capped":
+            # When result["ok"] is False, result["used_pct"] must be None.
+            # used_pct is already a soft/approximate value with no reliable
+            # resets_at to pair with a "· 快取" badge (unlike Claude's cache
+            # path). Do not recompute a guessed percentage from the local
+            # ledger when the live probe was untrustworthy.
+            if cached.get("live_status") == "ok":
                 cached["used_pct"] = _go_soft_pct(local)
                 cached["approx"] = True
+            elif cached.get("ok") is not True:
+                cached["used_pct"] = None
             return cached
 
     key = _opencode_key()
@@ -1719,6 +1725,7 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
             "error": "no OPENCODE_ZEN_API_KEY / auth.json",
             "local": local,
             "caps": caps,
+            "used_pct": None,
         }
 
     # Tiny probe — min model, 1 completion token
@@ -1850,6 +1857,10 @@ def opencode_go_usage(force: bool = False) -> dict[str, Any]:
         "_fetched_at": datetime.now(timezone.utc).isoformat(),
         "_fetched_at_ts": _now(),
     }
+    # Belt-and-suspenders: untrustworthy live probes must not carry a
+    # numeric used_pct. Capped (ok=True, used_pct=100) is unchanged.
+    if result["ok"] is False:
+        result["used_pct"] = None
     try:
         _write_cache_json(GO_CACHE, result)
     except OSError:

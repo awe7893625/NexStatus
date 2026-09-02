@@ -145,6 +145,111 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(result["live_status"], "error")
         self.assertIn("key 無效", result["error"])
 
+    def test_opencode_go_usage_cache_error_does_not_recompute_used_pct(self) -> None:
+        """Cached ok:false must not pick up a local-ledger percentage."""
+        now = collector._now()
+        cached = {
+            "ok": False,
+            "live_status": "error",
+            "used_pct": None,
+            "error": "OpenCode Go API 錯誤 HTTP 500",
+            "message": "synthetic probe failure",
+            "caps": {
+                "five_hour_usd": 12.0,
+                "weekly_usd": 30.0,
+                "monthly_usd": 60.0,
+            },
+            "_fetched_at_ts": now,
+            "_fetched_at": "2026-09-02T00:00:00+00:00",
+        }
+        local = {
+            "req_5h": 0,
+            "req_7d": 0,
+            "req_30d": 0,
+            "shadow_usd_5h": 0.0,
+            "shadow_usd_7d": 0.0,
+            "shadow_usd_30d": 7.8,
+            "top_models_30d": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            cache.mkdir()
+            go = cache / "opencode-go.json"
+            go.write_text(json.dumps(cached), encoding="utf-8")
+            with mock.patch.object(collector, "_opencode_key", return_value="fake-key"), mock.patch.object(
+                collector, "_go_local_ledger", return_value=local
+            ), mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                GO_CACHE=go,
+                KNOWN_CACHE_FILES=(go,),
+            ), mock.patch.object(urllib.request, "urlopen") as urlopen:
+                result = collector.opencode_go_usage(force=False)
+                urlopen.assert_not_called()
+
+        self.assertIs(result["ok"], False)
+        self.assertIs(result["used_pct"], None)
+
+    def test_opencode_go_usage_cache_ok_recomputes_and_capped_keeps_100(self) -> None:
+        """Fresh ok cache still recomputes soft pct; capped cache stays at 100."""
+        now = collector._now()
+        local = {
+            "req_5h": 0,
+            "req_7d": 0,
+            "req_30d": 0,
+            "shadow_usd_5h": 0.0,
+            "shadow_usd_7d": 0.0,
+            "shadow_usd_30d": 7.8,
+            "top_models_30d": [],
+        }
+        ok_cached = {
+            "ok": True,
+            "live_status": "ok",
+            "used_pct": 42,
+            "caps": {
+                "five_hour_usd": 12.0,
+                "weekly_usd": 30.0,
+                "monthly_usd": 60.0,
+            },
+            "_fetched_at_ts": now,
+            "_fetched_at": "2026-09-02T00:00:00+00:00",
+        }
+        capped_cached = {
+            "ok": True,
+            "live_status": "capped",
+            "used_pct": 100,
+            "limit_name": "monthly",
+            "caps": {
+                "five_hour_usd": 12.0,
+                "weekly_usd": 30.0,
+                "monthly_usd": 60.0,
+            },
+            "_fetched_at_ts": now,
+            "_fetched_at": "2026-09-02T00:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            cache.mkdir()
+            go = cache / "opencode-go.json"
+            with mock.patch.object(collector, "_opencode_key", return_value="fake-key"), mock.patch.object(
+                collector, "_go_local_ledger", return_value=local
+            ), mock.patch.multiple(
+                collector,
+                CACHE_DIR=cache,
+                GO_CACHE=go,
+                KNOWN_CACHE_FILES=(go,),
+            ), mock.patch.object(urllib.request, "urlopen") as urlopen:
+                go.write_text(json.dumps(ok_cached), encoding="utf-8")
+                ok_result = collector.opencode_go_usage(force=False)
+                go.write_text(json.dumps(capped_cached), encoding="utf-8")
+                capped_result = collector.opencode_go_usage(force=False)
+                urlopen.assert_not_called()
+
+        self.assertIs(ok_result["ok"], True)
+        self.assertIsInstance(ok_result["used_pct"], int)
+        self.assertIs(capped_result["ok"], True)
+        self.assertEqual(capped_result["used_pct"], 100)
+
     def test_annotate_flags_false_available_when_billing_has_room(self) -> None:
         """Billing 0/15000 + chat blocked → 帳務鎖 / false_available."""
         result = {

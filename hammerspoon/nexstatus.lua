@@ -2646,6 +2646,23 @@ buildHTML = function(s)
     orderedSections = orderedSections .. (sections[id] or "")
   end
   local goResetAt = type(go.resets_in_sec) == "number" and (os.time() + go.resets_in_sec) or nil
+  local goSheetRows, goSheetSource
+  if go.live_status == "capped" then
+    goSheetRows = {
+      { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
+    }
+    goSheetSource = "OpenCode 官方 429"
+  elseif go.ok then
+    goSheetRows = {
+      { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
+    }
+    goSheetSource = "本機成本帳估算"
+  else
+    goSheetRows = {
+      { label = "狀態", usage = tostring(go.error or go.message or "尚無 OpenCode Go 資料"), reset = "—" },
+    }
+    goSheetSource = "OpenCode 錯誤 · 無可靠額度資料"
+  end
   local providerSheets = providerUsageSheetHTML("claude", "Claude Usage", "5 小時與 7 日訂閱額度", {
       { label = "5 小時視窗", usage = pctText(cl.five_hour_pct), reset = fmtResetFull(cl.five_hour_resets_at) },
       { label = "7 日視窗", usage = pctText(cl.seven_day_pct), reset = fmtResetFull(cl.seven_day_resets_at) },
@@ -2654,9 +2671,7 @@ buildHTML = function(s)
       { label = "5 小時視窗", usage = pctText(cx.five_hour_pct), reset = fmtResetFull(cx.five_hour_resets_at) },
       { label = "7 日視窗", usage = pctText(cx.seven_day_pct), reset = fmtResetFull(cx.seven_day_resets_at) },
     }, cx.source)
-    .. providerUsageSheetHTML("go", "OpenCode Go Usage", tostring(go.limit_name or "官方額度"), {
-      { label = tostring(go.limit_name or "目前限制"), usage = pctText(go.used_pct), reset = fmtResetFull(goResetAt) },
-    }, go.live_status == "capped" and "OpenCode 官方 429" or "本機成本帳估算")
+    .. providerUsageSheetHTML("go", "OpenCode Go Usage", tostring(go.limit_name or "官方額度"), goSheetRows, goSheetSource)
     .. providerUsageSheetHTML("grok", "Grok Usage · 多帳號",
       "G1/G2/G3 週額度 + 月 credits（週=官方或本機 billing 快照估）",
       gkSeatSheetRows,
