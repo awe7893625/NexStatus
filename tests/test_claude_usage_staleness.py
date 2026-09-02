@@ -210,13 +210,23 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
             temp_file.unlink(missing_ok=True)
 
     def test_five_hour_window_exactly_at_threshold_still_trusted(self) -> None:
-        """Boundary test: source_age just below CLAUDE_FIVE_HOUR_WINDOW_SEC should be trusted.
+        """Boundary test: source_age == CLAUDE_FIVE_HOUR_WINDOW_SEC (exactly, not approximately)
+        must still be trusted, because the staleness check is strict `>`, not `>=`.
 
-        The staleness check uses strict `>` comparison, so just-below-threshold means
-        the window is still within bounds and data should pass through.
+        A naive version of this test that only sets the file's mtime relative to
+        `time.time()` at setup time and lets `claude_usage()` call a fresh `time.time()`
+        internally cannot reliably hit the exact threshold: wall-clock time elapses
+        between file creation and the staleness check inside `claude_usage()`, so
+        `source_age` always ends up a little *larger* than the `age_seconds` requested
+        at setup, and a test aimed at "exactly 18000" would flake across the >/>= line
+        depending on scheduling jitter. To make the boundary deterministic, this test
+        pins both the file's mtime and `claude_usage()`'s notion of "now" 18000.0
+        seconds apart with no real-clock dependency in between, via
+        `mock.patch.object(collector, "_now", ...)`.
         """
-        reset_5h = int(time.time() + 2 * 3600)
-        reset_7d = int(time.time() + 3 * 86400)
+        fixed_now = time.time()
+        reset_5h = int(fixed_now + 2 * 3600)
+        reset_7d = int(fixed_now + 3 * 86400)
         temp_file = self._create_temp_claude_file(
             {
                 "rate_limits": {
@@ -230,11 +240,16 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
                     },
                 },
             },
-            age_seconds=17999.0,  # Just below 18000 sec (CLAUDE_FIVE_HOUR_WINDOW_SEC)
         )
+        # Force the file's mtime so that (fixed_now - mtime) == CLAUDE_FIVE_HOUR_WINDOW_SEC
+        # exactly, once claude_usage() is also pinned to `fixed_now` below.
+        target_mtime = fixed_now - collector.CLAUDE_FIVE_HOUR_WINDOW_SEC
+        os.utime(temp_file, (target_mtime, target_mtime))
 
         try:
             with mock.patch.object(
+                collector, "_now", return_value=fixed_now
+            ), mock.patch.object(
                 collector, "CLAUDE_STATUS", temp_file
             ), mock.patch.object(
                 collector, "CLAUDE_LEGACY", Path("/nonexistent")
@@ -244,13 +259,16 @@ class ClaudeUsageStalenessTests(unittest.TestCase):
                 result = collector.claude_usage()
 
             self.assertTrue(result.get("ok"))
-            # At exactly the threshold, the window should still be trusted (> check, not >=)
+            # source_age is exactly CLAUDE_FIVE_HOUR_WINDOW_SEC; strict `>` means the
+            # window is still trusted at the exact boundary (only *past* the boundary
+            # should it flip to unknown).
             self.assertEqual(result.get("five_hour_pct"), 45)
             self.assertEqual(result.get("five_hour_resets_at"), reset_5h)
-            # 7-day window should also pass through (18000 sec < 604800 sec)
+            # 7-day window is nowhere near its own threshold, must pass through too.
             self.assertEqual(result.get("seven_day_pct"), 30)
             self.assertEqual(result.get("seven_day_resets_at"), reset_7d)
-            # result["stale"] should be False because mtime is still within threshold
+            # result["stale"] should be False because mtime is exactly at, not past,
+            # the threshold.
             self.assertFalse(result.get("stale"))
         finally:
             temp_file.unlink(missing_ok=True)
